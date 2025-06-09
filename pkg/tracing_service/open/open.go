@@ -10,6 +10,7 @@ import (
 	"github.com/vphpersson/tracing/pkg/tracing"
 	"github.com/vphpersson/tracing_service/pkg/tracing_service"
 	"iter"
+	"sync"
 )
 
 func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq2[*ecs.Base, error] {
@@ -24,13 +25,21 @@ func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq
 			return
 		}
 
+		var mu sync.Mutex
+		receiverCtx, cancelReceiver := context.WithCancel(ctx)
+		defer cancelReceiver()
+
 		err := tracing.RunTracepointMapReceiver(
-			ctx,
+			receiverCtx,
 			program,
 			"syscalls",
 			"sys_enter_openat",
 			ebpfMap,
 			func(event *tracing_service.BpfFileOpenEvent) {
+				if receiverCtx.Err() != nil {
+					return
+				}
+
 				if event == nil {
 					return
 				}
@@ -44,8 +53,16 @@ func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq
 
 				// TODO: Enrich
 
-				if !yield(base, nil) {
+				mu.Lock()
+				defer mu.Unlock()
+				select {
+				case <-receiverCtx.Done():
 					return
+				default:
+					if !yield(base, nil) {
+						cancelReceiver()
+						return
+					}
 				}
 			},
 		)

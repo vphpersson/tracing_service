@@ -10,6 +10,7 @@ import (
 	"github.com/vphpersson/tracing/pkg/tracing"
 	"github.com/vphpersson/tracing_service/pkg/tracing_service"
 	"iter"
+	"sync"
 )
 
 var ReasonToString = map[uint16]string{
@@ -170,13 +171,21 @@ func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq
 			return
 		}
 
+		var mu sync.Mutex
+		receiverCtx, cancelReceiver := context.WithCancel(ctx)
+		defer cancelReceiver()
+
 		err := tracing.RunTracepointMapReceiver(
-			ctx,
+			receiverCtx,
 			program,
 			"skb",
 			"kfree_skb",
 			ebpfMap,
 			func(event *tracing_service.BpfPacketDropEvent) {
+				if receiverCtx.Err() != nil {
+					return
+				}
+
 				if event == nil {
 					return
 				}
@@ -190,8 +199,16 @@ func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq
 
 				EnrichWithPacketFreedEvent(base, event)
 
-				if !yield(base, nil) {
+				mu.Lock()
+				defer mu.Unlock()
+				select {
+				case <-receiverCtx.Done():
 					return
+				default:
+					if !yield(base, nil) {
+						cancelReceiver()
+						return
+					}
 				}
 			},
 		)

@@ -4,6 +4,7 @@ import "C"
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/Motmedel/ecs_go/ecs"
 	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
@@ -43,9 +44,10 @@ func main() {
 	}
 	slog.SetDefault(logger.Logger)
 
-	errGroup, errGroupCtx := errgroup.WithContext(context.Background())
-	ctx, cancel := context.WithCancel(errGroupCtx)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	errGroup, errGroupCtx := errgroup.WithContext(ctx)
 
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, os.Interrupt, syscall.SIGTERM)
@@ -61,7 +63,7 @@ func main() {
 		)
 	}
 
-	objs := tracing_service.BpfObjects{}
+	var objs tracing_service.BpfObjects
 	if err := tracing_service.LoadBpfObjects(&objs, nil); err != nil {
 		logger.FatalWithExitingMessage(
 			"An error occurred when loading objects.",
@@ -80,17 +82,17 @@ func main() {
 
 	iterators := []iter.Seq2[*ecs.Base, error]{
 		destroyConnectionTracing.Run(
-			ctx,
+			errGroupCtx,
 			objs.BpfPrograms.NfCtHelperDestroy,
 			objs.BpfMaps.DestroyConnectionEvents,
 		),
 		tcpRetransmissionTracing.Run(
-			ctx,
+			errGroupCtx,
 			objs.BpfPrograms.TcpRetransmitSkb,
 			objs.BpfMaps.TcpRetransmissionEvents,
 		),
 		connectTracing.Run(
-			ctx,
+			errGroupCtx,
 			objs.BpfPrograms.TcpConnect,
 			objs.BpfMaps.ConnectEvents,
 		),
@@ -112,10 +114,11 @@ func main() {
 	}
 
 	var printMutex sync.Mutex
+iteratorsLoop:
 	for _, iterator := range iterators {
 		select {
-		case <-ctx.Done():
-			continue
+		case <-errGroupCtx.Done():
+			break iteratorsLoop
 		default:
 			errGroup.Go(
 				func() error {
@@ -147,12 +150,11 @@ func main() {
 		}
 	}
 
-	if err := errGroup.Wait(); err != nil {
+	<-errGroupCtx.Done()
+	if err := errGroupCtx.Err(); err != nil && !errors.Is(err, context.Canceled){
 		logger.FatalWithExitingMessage(
 			"An error occurred when running a tracer.",
 			fmt.Errorf("errgroup wait: %w", err),
 		)
 	}
-
-	<-ctx.Done()
 }

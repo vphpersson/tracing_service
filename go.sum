@@ -1,5 +1,5 @@
-github.com/Motmedel/ecs_go v0.0.62 h1:zoS2l556+tDVd635T7OfP4JLVyA8mrfReaDOA9FyxvQ=
-github.com/Motmedel/ecs_go v0.0.62/go.mod h1:UwZhGtHYOtPrJ22s5hQTDpTbDPq9m+vfHItb8t++QKw=
+github.com/Motmedel/ecs_go v0.0.63 h1:nNtDZGrYIpt1EGyo34JiE97TJHZ58unsvZMwJaT63lk=
+github.com/Motmedel/ecs_go v0.0.63/go.mod h1:LBiQKqIHImB9hUAx6Ab7LcjbMFSxuU1ZFe9h5eCFs60=
 github.com/Motmedel/utils_go v0.0.205 h1:YkRyrVT5xKPnjaBsdbg6qD9ZyVIJPoNXorzR3EA7G5g=
 github.com/Motmedel/utils_go v0.0.205/go.mod h1:kKm8jM7GA8M7ICIImi5etOMixRgQfnStBPjEoCMTgbg=
 github.com/Motmedel/utils_go/pkg/net/domain_breakdown v0.0.5 h1:57lx54tX6LbHjMNv0qGnwQB/eo7axhbDnd6rVWyWjxc=
@@ -24,8 +24,8 @@ github.com/mdlayher/socket v0.4.1 h1:eM9y2/jlbs1M615oshPQOHZzj6R6wMT7bX5NPiQvn2U
 github.com/mdlayher/socket v0.4.1/go.mod h1:cAqeGjoufqdxWkD7DkpyS+wcefOtmu5OQ8KuoJGIReA=
 github.com/rogpeppe/go-internal v1.12.0 h1:exVL4IDcn6na9z1rAb56Vxr+CgyK3nn3O+epU5NdKM8=
 github.com/rogpeppe/go-internal v1.12.0/go.mod h1:E+RYuTGaKKdloAfM02xzb0FW3Paa99yedzYV+kq4uf4=
-github.com/vphpersson/tracing v0.0.2 h1:JmzTWTljl5WmmVE9RFLfBc/dyLE/EY2kmWNOhbOENDo=
-github.com/vphpersson/tracing v0.0.2/go.mod h1:wzkF1NPv3/lWLr6KsnzJk5hFh8vgfw2/GHegJCQkgiY=
+github.com/vphpersson/tracing v0.0.3 h1:Xf8+tNlZgkor+HxWDrr/uXtFNKUHctARgmLHzD/GkV8=
+github.com/vphpersson/tracing v0.0.3/go.mod h1:kZ+OQIx7KZ1RnYv3WRGGXjT5E16NaRHfvPimcB698gg=
 golang.org/x/net v0.40.0 h1:79Xs7wF06Gbdcg4kdCCIQArK11Z1hr5POQ6+fIYHNuY=
 golang.org/x/net v0.40.0/go.mod h1:y0hY0exeL2Pku80/zKK7tpntoX23cqL3Oa6njdgRtds=
 golang.org/x/sync v0.15.0 h1:KWH3jNZsfyT6xfAfKiz6MRNmd46ByHDYaZ7KSkCtdW8=
