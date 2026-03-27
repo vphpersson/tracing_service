@@ -6,6 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"iter"
+	"log/slog"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+
 	"github.com/Motmedel/ecs_go/ecs"
 	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
 	motmedelLog "github.com/Motmedel/utils_go/pkg/log"
@@ -16,12 +23,6 @@ import (
 	destroyConnectionTracing "github.com/vphpersson/tracing_service/pkg/tracing_service/destroy_connection"
 	tcpRetransmissionTracing "github.com/vphpersson/tracing_service/pkg/tracing_service/tcp_retransmission"
 	"golang.org/x/sync/errgroup"
-	"iter"
-	"log/slog"
-	"os"
-	"os/signal"
-	"sync"
-	"syscall"
 )
 
 func main() {
@@ -150,8 +151,7 @@ iteratorsLoop:
 		}
 	}
 
-	<-errGroupCtx.Done()
-	if err := errGroupCtx.Err(); err != nil && !errors.Is(err, context.Canceled){
+	if err := errGroup.Wait(); err != nil && !errors.Is(err, context.Canceled) {
 		logger.FatalWithExitingMessage(
 			"An error occurred when running a tracer.",
 			fmt.Errorf("errgroup wait: %w", err),

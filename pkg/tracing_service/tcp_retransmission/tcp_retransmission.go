@@ -105,6 +105,7 @@ func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq
 				defer mu.Unlock()
 				select {
 				case <-receiverCtx.Done():
+					return
 				default:
 					if !yield(base, nil) {
 						cancelReceiver()

@@ -7,8 +7,8 @@
 #include <bpf/bpf_endian.h>
 
 struct nf_conn_tstamp {
-	u_int64_t start;
-	u_int64_t stop;
+	uint64_t start;
+	uint64_t stop;
 };
 
 #define TASK_COMM_LEN 16
@@ -84,7 +84,7 @@ s32 enter_execve(struct exec_info *execve_ctx) {
 	}
 
     // Zero out the event for safety. If we don't do this, we risk sending random kernel memory back to userspace.
-    s32 ret = bpf_probe_read_kernel(event, sizeof(event), &zero_execve_event);
+    s32 ret = bpf_probe_read_kernel(event, sizeof(*event), &zero_execve_event);
     if (ret) {
 //        LOG1("zero out event: %d", ret);
         bpf_ringbuf_discard(event, 0);
@@ -460,7 +460,7 @@ SEC("tp/tcp/tcp_retransmit_synack")
 int tcp_retransmit_synack(struct trace_event_raw_tcp_retransmit_synack *ctx) {
     u64 timestamp_ns = bpf_cpu_to_be64(bpf_ktime_get_boot_ns());
 
-    struct tcp_retransmission_event *event;
+    struct tcp_retransmission_synack_event *event;
     event = bpf_ringbuf_reserve(&tcp_retransmission_synack_events, sizeof(struct tcp_retransmission_synack_event), 0);
     if (!event) {
         return 1;
