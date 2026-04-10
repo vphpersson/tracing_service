@@ -3,6 +3,7 @@ package free_packet
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
 	"github.com/Motmedel/utils_go/pkg/errors/types/nil_error"
 	"github.com/Motmedel/utils_go/pkg/schema"
@@ -139,18 +140,18 @@ func EnrichWithPacketFreedEvent(
 	base *schema.Base,
 	event *tracing_service.BpfPacketDropEvent,
 	reasonNames map[uint16]string,
-) error {
+) ([]any, error) {
 	if base == nil {
-		return nil
+		return nil, nil
 	}
 
 	if event == nil {
-		return nil
+		return nil, nil
 	}
 
 	bootTime, err := tracing.GetBootTime()
 	if err != nil {
-		return fmt.Errorf("get boot time: %w", err)
+		return nil, fmt.Errorf("get boot time: %w", err)
 	}
 
 	base.Timestamp = tracing.ConvertEbpfTimestampToIso8601(event.TimestampNs, bootTime)
@@ -188,6 +189,15 @@ func EnrichWithPacketFreedEvent(
 		base.Network.CommunityId = append(base.Network.CommunityId, communityId)
 	}
 
+	var tracingArgs []any
+	tracingArgs = append(tracingArgs, slog.Any("drop_reason_code", event.Reason))
+	if reasonString, ok := reasonNames[event.Reason]; ok {
+		tracingArgs = append(tracingArgs, slog.String("drop_reason", reasonString))
+	}
+	if event.Location != 0 {
+		tracingArgs = append(tracingArgs, slog.Any("location", event.Location))
+	}
+
 	var srcAddr, dstAddr, transport string
 	if s := base.Source; s != nil {
 		srcAddr = net.JoinHostPort(s.Ip, strconv.Itoa(s.Port))
@@ -201,7 +211,7 @@ func EnrichWithPacketFreedEvent(
 
 	base.Message = fmt.Sprintf("%s -> %s %s free_packet %s", srcAddr, dstAddr, transport, reasonPart)
 
-	return nil
+	return tracingArgs, nil
 }
 
 func Run(
@@ -209,8 +219,8 @@ func Run(
 	program *ebpf.Program,
 	ebpfMap *ebpf.Map,
 	reasonFilterMap *ebpf.Map,
-) iter.Seq2[*schema.Base, error] {
-	return func(yield func(*schema.Base, error) bool) {
+) iter.Seq2[*tracing_service.EventResult, error] {
+	return func(yield func(*tracing_service.EventResult, error) bool) {
 		if program == nil {
 			yield(nil, motmedelErrors.NewWithTrace(nil_error.New("program")))
 			return
@@ -258,12 +268,22 @@ func Run(
 
 				base := &schema.Base{
 					Event: &schema.Event{
-						Reason:  "A packet was freed.",
-						Dataset: "tracing.kfree_skb",
+						Kind:     "event",
+						Category: []string{"network"},
+						Type:     []string{"denied"},
+						Action:   "kfree_skb",
+						Module:   "tracing",
+						Reason:   "A packet was freed.",
+						Dataset:  "tracing.kfree_skb",
 					},
 				}
 
-				EnrichWithPacketFreedEvent(base, event, reasonNames)
+				tracingArgs, _ := EnrichWithPacketFreedEvent(base, event, reasonNames)
+
+				result := &tracing_service.EventResult{Base: base}
+				if len(tracingArgs) > 0 {
+					result.Attrs = []slog.Attr{slog.Group("tracing", tracingArgs...)}
+				}
 
 				mu.Lock()
 				defer mu.Unlock()
@@ -271,7 +291,7 @@ func Run(
 				case <-receiverCtx.Done():
 					return
 				default:
-					if !yield(base, nil) {
+					if !yield(result, nil) {
 						cancelReceiver()
 						return
 					}

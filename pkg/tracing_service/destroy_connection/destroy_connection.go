@@ -11,6 +11,7 @@ import (
 	"github.com/vphpersson/tracing/pkg/tracing"
 	"github.com/vphpersson/tracing_service/pkg/tracing_service"
 	"iter"
+	"log/slog"
 	"net"
 	"strconv"
 	"strings"
@@ -92,18 +93,18 @@ func translateStatusBits(status int) []string {
 	return names
 }
 
-func EnrichWithDestroyConnectionEvent(base *schema.Base, event *tracing_service.BpfDestroyConnectionEvent) error {
+func EnrichWithDestroyConnectionEvent(base *schema.Base, event *tracing_service.BpfDestroyConnectionEvent) ([]any, error) {
 	if base == nil {
-		return nil
+		return nil, nil
 	}
 
 	if event == nil {
-		return nil
+		return nil, nil
 	}
 
 	bootTime, err := tracing.GetBootTime()
 	if err != nil {
-		return fmt.Errorf("get boot time: %w", err)
+		return nil, fmt.Errorf("get boot time: %w", err)
 	}
 
 	base.Timestamp = tracing.ConvertEbpfTimestampToIso8601(event.TimestampNs, bootTime)
@@ -134,6 +135,10 @@ func EnrichWithDestroyConnectionEvent(base *schema.Base, event *tracing_service.
 			int64(event.Stop/1e9),
 			int64(event.Stop)%1e9,
 		).UTC().Format("2006-01-02T15:04:05.999999999Z")
+
+		if event.Stop > event.Start {
+			ecsEvent.Duration = int64(event.Stop - event.Start)
+		}
 	}
 
 	tcpStateName, ok := tcpStateIdToName[event.TcpState]
@@ -144,16 +149,6 @@ func EnrichWithDestroyConnectionEvent(base *schema.Base, event *tracing_service.
 			base.Tcp = ecsTcp
 		}
 		ecsTcp.State = tcpStateName
-	}
-
-	if event.ConntrackStatusMask != 0 {
-		statusNames := translateStatusBits(int(event.ConntrackStatusMask))
-		if len(statusNames) > 0 {
-			if base.Labels == nil {
-				base.Labels = make(map[string]string)
-			}
-			base.Labels["conntrack_status"] = strings.Join(statusNames, ",")
-		}
 	}
 
 	if event.AddressFamily == uint16(syscall.AF_INET6) {
@@ -182,13 +177,34 @@ func EnrichWithDestroyConnectionEvent(base *schema.Base, event *tracing_service.
 	if n := base.Network; n != nil {
 		transport = n.Transport
 	}
-	base.Message = fmt.Sprintf("%s -> %s %s destroy_connection", srcAddr, dstAddr, transport)
+	var tracingArgs []any
 
-	return nil
+	if event.ConntrackStatusMask != 0 {
+		statusNames := translateStatusBits(int(event.ConntrackStatusMask))
+		if len(statusNames) > 0 {
+			tracingArgs = append(tracingArgs, slog.String("conntrack_status", strings.Join(statusNames, ",")))
+		}
+	}
+
+	if event.Timeout != 0 {
+		tracingArgs = append(tracingArgs, slog.Any("timeout", event.Timeout))
+	}
+
+	tracingArgs = append(tracingArgs, slog.Any("tcp_last_direction", event.TcpLastDirection))
+
+	var stateSuffix string
+	if event.TransportProtocol == 6 {
+		if name, ok := tcpStateIdToName[event.TcpState]; ok {
+			stateSuffix = " " + name
+		}
+	}
+	base.Message = fmt.Sprintf("%s -> %s %s destroy_connection%s", srcAddr, dstAddr, transport, stateSuffix)
+
+	return tracingArgs, nil
 }
 
-func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq2[*schema.Base, error] {
-	return func(yield func(*schema.Base, error) bool) {
+func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq2[*tracing_service.EventResult, error] {
+	return func(yield func(*tracing_service.EventResult, error) bool) {
 		if program == nil {
 			yield(nil, motmedelErrors.NewWithTrace(nil_error.New("program")))
 			return
@@ -218,12 +234,22 @@ func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq
 
 				base := &schema.Base{
 					Event: &schema.Event{
-						Reason:  "A connection was destroyed by Conntrack.",
-						Dataset: "tracing.destroy_connection",
+						Kind:     "event",
+						Category: []string{"network"},
+						Type:     []string{"connection", "end"},
+						Action:   "destroy_connection",
+						Module:   "tracing",
+						Reason:   "A connection was destroyed by Conntrack.",
+						Dataset:  "tracing.destroy_connection",
 					},
 				}
 
-				EnrichWithDestroyConnectionEvent(base, event)
+				tracingArgs, _ := EnrichWithDestroyConnectionEvent(base, event)
+
+				result := &tracing_service.EventResult{Base: base}
+				if len(tracingArgs) > 0 {
+					result.Attrs = []slog.Attr{slog.Group("tracing", tracingArgs...)}
+				}
 
 				mu.Lock()
 				defer mu.Unlock()
@@ -231,7 +257,7 @@ func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq
 				case <-receiverCtx.Done():
 					return
 				default:
-					if !yield(base, nil) {
+					if !yield(result, nil) {
 						cancelReceiver()
 						return
 					}

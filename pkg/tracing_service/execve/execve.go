@@ -109,8 +109,8 @@ func EnrichWithExecveEvent(base *schema.Base, event *tracing_service.BpfExecveEv
 	return nil
 }
 
-func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq2[*schema.Base, error] {
-	return func(yield func(*schema.Base, error) bool) {
+func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq2[*tracing_service.EventResult, error] {
+	return func(yield func(*tracing_service.EventResult, error) bool) {
 		if program == nil {
 			yield(nil, motmedelErrors.NewWithTrace(nil_error.New("program")))
 			return
@@ -142,8 +142,13 @@ func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq
 
 				base := &schema.Base{
 					Event: &schema.Event{
-						Reason:  "An execve call was made.",
-						Dataset: "tracing.execve",
+						Kind:     "event",
+						Category: []string{"process"},
+						Type:     []string{"start"},
+						Action:   "execve",
+						Module:   "tracing",
+						Reason:   "An execve call was made.",
+						Dataset:  "tracing.execve",
 					},
 				}
 
@@ -155,7 +160,7 @@ func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq
 				case <-receiverCtx.Done():
 					return
 				default:
-					if !yield(base, nil) {
+					if !yield(&tracing_service.EventResult{Base: base}, nil) {
 						cancelReceiver()
 						return
 					}

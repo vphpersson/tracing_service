@@ -144,8 +144,8 @@ func EnrichWithConnectEvent(base *schema.Base, event *tracing_service.BpfConnect
 	return nil
 }
 
-func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq2[*schema.Base, error] {
-	return func(yield func(*schema.Base, error) bool) {
+func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq2[*tracing_service.EventResult, error] {
+	return func(yield func(*tracing_service.EventResult, error) bool) {
 		if program == nil {
 			yield(nil, motmedelErrors.NewWithTrace(nil_error.New("program")))
 			return
@@ -175,8 +175,13 @@ func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq
 
 				base := &schema.Base{
 					Event: &schema.Event{
-						Reason:  "A connect call was made.",
-						Dataset: "tracing.connect",
+						Kind:     "event",
+						Category: []string{"network"},
+						Type:     []string{"connection", "start"},
+						Action:   "tcp_connect",
+						Module:   "tracing",
+						Reason:   "A connect call was made.",
+						Dataset:  "tracing.connect",
 					},
 				}
 
@@ -188,7 +193,7 @@ func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq
 				case <-receiverCtx.Done():
 					return
 				default:
-					if !yield(base, nil) {
+					if !yield(&tracing_service.EventResult{Base: base}, nil) {
 						cancelReceiver()
 						return
 					}

@@ -11,22 +11,23 @@ import (
 	"github.com/vphpersson/tracing/pkg/tracing"
 	"github.com/vphpersson/tracing_service/pkg/tracing_service"
 	"iter"
+	"log/slog"
 	"path/filepath"
 	"sync"
 )
 
-func EnrichWithFileOpenEvent(base *schema.Base, event *tracing_service.BpfFileOpenEvent) error {
+func EnrichWithFileOpenEvent(base *schema.Base, event *tracing_service.BpfFileOpenEvent) ([]any, error) {
 	if base == nil {
-		return nil
+		return nil, nil
 	}
 
 	if event == nil {
-		return nil
+		return nil, nil
 	}
 
 	bootTime, err := tracing.GetBootTime()
 	if err != nil {
-		return fmt.Errorf("get boot time: %w", err)
+		return nil, fmt.Errorf("get boot time: %w", err)
 	}
 
 	base.Timestamp = tracing.ConvertEbpfTimestampToIso8601(event.TimestampNs, bootTime)
@@ -64,11 +65,15 @@ func EnrichWithFileOpenEvent(base *schema.Base, event *tracing_service.BpfFileOp
 
 	base.Message = fmt.Sprintf("%s opened %q", processTitle, filename)
 
-	return nil
+	var tracingArgs []any
+	tracingArgs = append(tracingArgs, slog.Int("flags", int(event.Flags)))
+	tracingArgs = append(tracingArgs, slog.Int("mode", int(event.Mode)))
+
+	return tracingArgs, nil
 }
 
-func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq2[*schema.Base, error] {
-	return func(yield func(*schema.Base, error) bool) {
+func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq2[*tracing_service.EventResult, error] {
+	return func(yield func(*tracing_service.EventResult, error) bool) {
 		if program == nil {
 			yield(nil, motmedelErrors.NewWithTrace(nil_error.New("program")))
 			return
@@ -100,12 +105,22 @@ func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq
 
 				base := &schema.Base{
 					Event: &schema.Event{
-						Reason:  "An openat call was made.",
-						Dataset: "tracing.openat",
+						Kind:     "event",
+						Category: []string{"file"},
+						Type:     []string{"access"},
+						Action:   "openat",
+						Module:   "tracing",
+						Reason:   "An openat call was made.",
+						Dataset:  "tracing.openat",
 					},
 				}
 
-				EnrichWithFileOpenEvent(base, event)
+				tracingArgs, _ := EnrichWithFileOpenEvent(base, event)
+
+				result := &tracing_service.EventResult{Base: base}
+				if len(tracingArgs) > 0 {
+					result.Attrs = []slog.Attr{slog.Group("tracing", tracingArgs...)}
+				}
 
 				mu.Lock()
 				defer mu.Unlock()
@@ -113,7 +128,7 @@ func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq
 				case <-receiverCtx.Done():
 					return
 				default:
-					if !yield(base, nil) {
+					if !yield(result, nil) {
 						cancelReceiver()
 						return
 					}

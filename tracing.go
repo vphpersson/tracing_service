@@ -3,7 +3,6 @@ package main
 import "C"
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
@@ -12,9 +11,9 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
-	"github.com/Motmedel/utils_go/pkg/schema"
 	schemaLog "github.com/Motmedel/utils_go/pkg/schema/log"
 	motmedelLog "github.com/Motmedel/utils_go/pkg/log"
 	motmedelErrorLogger "github.com/Motmedel/utils_go/pkg/log/error_logger"
@@ -48,6 +47,15 @@ func main() {
 		).With(slog.Group("event", slog.String("dataset", "tracing"))),
 	}
 	slog.SetDefault(logger.Logger)
+
+	eventHandler := slog.NewJSONHandler(
+		os.Stdout,
+		&slog.HandlerOptions{
+			AddSource:   false,
+			Level:       slog.LevelInfo,
+			ReplaceAttr: schemaLog.ReplaceAttr,
+		},
+	)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -85,7 +93,7 @@ func main() {
 		}
 	}()
 
-	iterators := []iter.Seq2[*schema.Base, error]{
+	iterators := []iter.Seq2[*tracing_service.EventResult, error]{
 		destroyConnectionTracing.Run(
 			errGroupCtx,
 			objs.BpfPrograms.NfCtHelperDestroy,
@@ -95,6 +103,11 @@ func main() {
 			errGroupCtx,
 			objs.BpfPrograms.TcpRetransmitSkb,
 			objs.BpfMaps.TcpRetransmissionEvents,
+		),
+		tcpRetransmissionTracing.RunSynack(
+			errGroupCtx,
+			objs.BpfPrograms.TcpRetransmitSynack,
+			objs.BpfMaps.TcpRetransmissionSynackEvents,
 		),
 		tcpSetStateTracing.Run(
 			errGroupCtx,
@@ -133,25 +146,25 @@ iteratorsLoop:
 		default:
 			errGroup.Go(
 				func() error {
-					for base, err := range iterator {
+					for result, err := range iterator {
 						if err != nil {
 							return fmt.Errorf("iterator: %w", err)
 						}
-						if base == nil {
+						if result == nil || result.Base == nil {
 							continue
 						}
 
-						data, err := json.Marshal(base)
-						if err != nil {
-							logger.Error(
-								"An error occurred when marshaling a base. Skipping.",
-								motmedelErrors.NewWithTrace(fmt.Errorf("json marshal: %w", err), base),
-							)
-							continue
-						}
+						base := result.Base
+
+						attrs := tracing_service.BaseToSlogAttrs(base)
+						attrs = append(attrs, result.Attrs...)
+
+						eventTime, _ := time.Parse(time.RFC3339Nano, base.Timestamp)
+						record := slog.NewRecord(eventTime, slog.LevelInfo, base.Message, 0)
+						record.AddAttrs(attrs...)
 
 						printMutex.Lock()
-						fmt.Println(string(data))
+						_ = eventHandler.Handle(context.Background(), record)
 						printMutex.Unlock()
 					}
 
