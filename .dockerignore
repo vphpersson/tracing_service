@@ -2,4 +2,4 @@
 !/go.mod
 !/go.sum
 !/tracing.go
-!/pkg/
+!/pkg/**
