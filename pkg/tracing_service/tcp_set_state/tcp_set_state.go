@@ -3,10 +3,11 @@ package tcp_set_state
 import (
 	"context"
 	"fmt"
-	"github.com/Motmedel/ecs_go/ecs"
 	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
+	"github.com/Motmedel/utils_go/pkg/errors/types/nil_error"
+	"github.com/Motmedel/utils_go/pkg/schema"
+	schemaUtils "github.com/Motmedel/utils_go/pkg/schema/utils"
 	"github.com/cilium/ebpf"
-	tracingErrors "github.com/vphpersson/tracing/pkg/errors"
 	"github.com/vphpersson/tracing/pkg/tracing"
 	"github.com/vphpersson/tracing_service/pkg/tracing_service"
 	"iter"
@@ -38,16 +39,21 @@ func stateName(state uint16) string {
 	return strconv.Itoa(int(state))
 }
 
-func EnrichWithTcpSetStateEvent(base *ecs.Base, event *tracing_service.BpfTcpSetStateEvent) {
+func EnrichWithTcpSetStateEvent(base *schema.Base, event *tracing_service.BpfTcpSetStateEvent) error {
 	if base == nil {
-		return
+		return nil
 	}
 
 	if event == nil {
-		return
+		return nil
 	}
 
-	base.Timestamp = tracing.ConvertEbpfTimestampToIso8601(event.TimestampNs, tracing.GetBootTime())
+	bootTime, err := tracing.GetBootTime()
+	if err != nil {
+		return fmt.Errorf("get boot time: %w", err)
+	}
+
+	base.Timestamp = tracing.ConvertEbpfTimestampToIso8601(event.TimestampNs, bootTime)
 
 	tracing.EnrichWithConnectionInformationTransport(
 		base,
@@ -61,7 +67,7 @@ func EnrichWithTcpSetStateEvent(base *ecs.Base, event *tracing_service.BpfTcpSet
 
 	ecsTcp := base.Tcp
 	if ecsTcp == nil {
-		ecsTcp = &ecs.Tcp{}
+		ecsTcp = &schema.Tcp{}
 		base.Tcp = ecsTcp
 	}
 	ecsTcp.State = stateName(event.NewState)
@@ -69,15 +75,15 @@ func EnrichWithTcpSetStateEvent(base *ecs.Base, event *tracing_service.BpfTcpSet
 	if event.AddressFamily == uint16(syscall.AF_INET6) {
 		if tracing_service.IsIPv4MappedIPv6(event.SourceAddress) || tracing_service.IsIPv4MappedIPv6(event.DestinationAddress) {
 			if base.Network == nil {
-				base.Network = &ecs.Network{}
+				base.Network = &schema.Network{}
 			}
 			base.Network.Type = "ipv4"
 		}
 	}
 
-	if communityId := ecs.CommunityIdFromTargets(base.Source, base.Destination, 6); communityId != "" {
+	if communityId := schemaUtils.CommunityIdFromTargets(base.Source, base.Destination, 6); communityId != "" {
 		if base.Network == nil {
-			base.Network = &ecs.Network{}
+			base.Network = &schema.Network{}
 		}
 		base.Network.CommunityId = append(base.Network.CommunityId, communityId)
 	}
@@ -90,23 +96,25 @@ func EnrichWithTcpSetStateEvent(base *ecs.Base, event *tracing_service.BpfTcpSet
 		dstAddr = net.JoinHostPort(d.Ip, strconv.Itoa(d.Port))
 	}
 	base.Message = fmt.Sprintf(
-		"tcp_set_state: %s -> %s %s -> %s",
+		"%s -> %s tcp tcp_set_state %s -> %s",
 		srcAddr,
 		dstAddr,
 		stateName(event.OldState),
 		stateName(event.NewState),
 	)
+
+	return nil
 }
 
-func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq2[*ecs.Base, error] {
-	return func(yield func(*ecs.Base, error) bool) {
+func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq2[*schema.Base, error] {
+	return func(yield func(*schema.Base, error) bool) {
 		if program == nil {
-			yield(nil, motmedelErrors.NewWithTrace(tracingErrors.ErrNilEbpfProgram))
+			yield(nil, motmedelErrors.NewWithTrace(nil_error.New("program")))
 			return
 		}
 
 		if ebpfMap == nil {
-			yield(nil, motmedelErrors.NewWithTrace(tracingErrors.ErrNilEbpfMap))
+			yield(nil, motmedelErrors.NewWithTrace(nil_error.New("ebpf map")))
 			return
 		}
 
@@ -129,8 +137,8 @@ func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq
 					return
 				}
 
-				base := &ecs.Base{
-					Event: &ecs.Event{
+				base := &schema.Base{
+					Event: &schema.Event{
 						Reason:  "A TCP socket changed state.",
 						Dataset: "tracing.inet_sock_set_state",
 					},

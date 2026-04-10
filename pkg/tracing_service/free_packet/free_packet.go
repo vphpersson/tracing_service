@@ -3,14 +3,17 @@ package free_packet
 import (
 	"context"
 	"fmt"
-	"github.com/Motmedel/ecs_go/ecs"
 	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
+	"github.com/Motmedel/utils_go/pkg/errors/types/nil_error"
+	"github.com/Motmedel/utils_go/pkg/schema"
+	schemaUtils "github.com/Motmedel/utils_go/pkg/schema/utils"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/btf"
-	tracingErrors "github.com/vphpersson/tracing/pkg/errors"
 	"github.com/vphpersson/tracing/pkg/tracing"
 	"github.com/vphpersson/tracing_service/pkg/tracing_service"
 	"iter"
+	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -133,19 +136,24 @@ func populateReasonFilter(filterMap *ebpf.Map, allowed []uint16) error {
 }
 
 func EnrichWithPacketFreedEvent(
-	base *ecs.Base,
+	base *schema.Base,
 	event *tracing_service.BpfPacketDropEvent,
 	reasonNames map[uint16]string,
-) {
+) error {
 	if base == nil {
-		return
+		return nil
 	}
 
 	if event == nil {
-		return
+		return nil
 	}
 
-	base.Timestamp = tracing.ConvertEbpfTimestampToIso8601(event.TimestampNs, tracing.GetBootTime())
+	bootTime, err := tracing.GetBootTime()
+	if err != nil {
+		return fmt.Errorf("get boot time: %w", err)
+	}
+
+	base.Timestamp = tracing.ConvertEbpfTimestampToIso8601(event.TimestampNs, bootTime)
 
 	tracing.EnrichWithConnectionInformationTransport(
 		base,
@@ -159,26 +167,41 @@ func EnrichWithPacketFreedEvent(
 
 	var reasonPart string
 	if reasonString, ok := reasonNames[event.Reason]; ok {
-		reasonPart = fmt.Sprintf("%s ", reasonString)
+		reasonPart = reasonString
+	} else {
+		reasonPart = fmt.Sprintf("%d", event.Reason)
 	}
 
 	if event.AddressFamily == uint16(syscall.AF_INET6) {
 		if tracing_service.IsIPv4MappedIPv6(event.SourceAddress) || tracing_service.IsIPv4MappedIPv6(event.DestinationAddress) {
 			if base.Network == nil {
-				base.Network = &ecs.Network{}
+				base.Network = &schema.Network{}
 			}
 			base.Network.Type = "ipv4"
 		}
 	}
 
-	if communityId := ecs.CommunityIdFromTargets(base.Source, base.Destination, int(event.TransportProtocol)); communityId != "" {
+	if communityId := schemaUtils.CommunityIdFromTargets(base.Source, base.Destination, int(event.TransportProtocol)); communityId != "" {
 		if base.Network == nil {
-			base.Network = &ecs.Network{}
+			base.Network = &schema.Network{}
 		}
 		base.Network.CommunityId = append(base.Network.CommunityId, communityId)
 	}
 
-	base.Message = ecs.MakeConnectionMessage(base, fmt.Sprintf("%s(%d)", reasonPart, event.Reason))
+	var srcAddr, dstAddr, transport string
+	if s := base.Source; s != nil {
+		srcAddr = net.JoinHostPort(s.Ip, strconv.Itoa(s.Port))
+	}
+	if d := base.Destination; d != nil {
+		dstAddr = net.JoinHostPort(d.Ip, strconv.Itoa(d.Port))
+	}
+	if n := base.Network; n != nil {
+		transport = n.Transport
+	}
+
+	base.Message = fmt.Sprintf("%s -> %s %s free_packet %s", srcAddr, dstAddr, transport, reasonPart)
+
+	return nil
 }
 
 func Run(
@@ -186,20 +209,20 @@ func Run(
 	program *ebpf.Program,
 	ebpfMap *ebpf.Map,
 	reasonFilterMap *ebpf.Map,
-) iter.Seq2[*ecs.Base, error] {
-	return func(yield func(*ecs.Base, error) bool) {
+) iter.Seq2[*schema.Base, error] {
+	return func(yield func(*schema.Base, error) bool) {
 		if program == nil {
-			yield(nil, motmedelErrors.NewWithTrace(tracingErrors.ErrNilEbpfProgram))
+			yield(nil, motmedelErrors.NewWithTrace(nil_error.New("program")))
 			return
 		}
 
 		if ebpfMap == nil {
-			yield(nil, motmedelErrors.NewWithTrace(tracingErrors.ErrNilEbpfMap))
+			yield(nil, motmedelErrors.NewWithTrace(nil_error.New("ebpf map")))
 			return
 		}
 
 		if reasonFilterMap == nil {
-			yield(nil, motmedelErrors.NewWithTrace(tracingErrors.ErrNilEbpfMap))
+			yield(nil, motmedelErrors.NewWithTrace(nil_error.New("ebpf map")))
 			return
 		}
 
@@ -233,8 +256,8 @@ func Run(
 					return
 				}
 
-				base := &ecs.Base{
-					Event: &ecs.Event{
+				base := &schema.Base{
+					Event: &schema.Event{
 						Reason:  "A packet was freed.",
 						Dataset: "tracing.kfree_skb",
 					},

@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/Motmedel/ecs_go/ecs"
 	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
+	"github.com/Motmedel/utils_go/pkg/errors/types/nil_error"
+	"github.com/Motmedel/utils_go/pkg/schema"
 	motmedelStrings "github.com/Motmedel/utils_go/pkg/strings"
 	"github.com/cilium/ebpf"
-	tracingErrors "github.com/vphpersson/tracing/pkg/errors"
 	"github.com/vphpersson/tracing/pkg/tracing"
 	"github.com/vphpersson/tracing_service/pkg/tracing_service"
 	"iter"
@@ -16,16 +16,21 @@ import (
 	"sync"
 )
 
-func EnrichWithExecveEvent(base *ecs.Base, event *tracing_service.BpfExecveEvent) {
+func EnrichWithExecveEvent(base *schema.Base, event *tracing_service.BpfExecveEvent) error {
 	if base == nil {
-		return
+		return nil
 	}
 
 	if event == nil {
-		return
+		return nil
 	}
 
-	base.Timestamp = tracing.ConvertEbpfTimestampToIso8601(event.TimestampNs, tracing.GetBootTime())
+	bootTime, err := tracing.GetBootTime()
+	if err != nil {
+		return fmt.Errorf("get boot time: %w", err)
+	}
+
+	base.Timestamp = tracing.ConvertEbpfTimestampToIso8601(event.TimestampNs, bootTime)
 
 	tracing.EnrichWithProcessInformation(
 		base,
@@ -48,7 +53,7 @@ func EnrichWithExecveEvent(base *ecs.Base, event *tracing_service.BpfExecveEvent
 
 	ecsProcess := base.Process
 	if ecsProcess == nil {
-		ecsProcess = &ecs.Process{}
+		ecsProcess = &schema.Process{}
 		base.Process = ecsProcess
 	}
 
@@ -65,7 +70,7 @@ func EnrichWithExecveEvent(base *ecs.Base, event *tracing_service.BpfExecveEvent
 
 	ecsProcessParent := ecsProcess.Parent
 	if ecsProcessParent == nil {
-		ecsProcessParent = &ecs.Process{}
+		ecsProcessParent = &schema.Process{}
 		ecsProcess.Parent = ecsProcessParent
 	}
 
@@ -100,17 +105,19 @@ func EnrichWithExecveEvent(base *ecs.Base, event *tracing_service.BpfExecveEvent
 	}
 
 	base.Message = fmt.Sprintf("execve: %s -> %s", parentExe, ecsProcess.Executable)
+
+	return nil
 }
 
-func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq2[*ecs.Base, error] {
-	return func(yield func(*ecs.Base, error) bool) {
+func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq2[*schema.Base, error] {
+	return func(yield func(*schema.Base, error) bool) {
 		if program == nil {
-			yield(nil, motmedelErrors.NewWithTrace(tracingErrors.ErrNilEbpfProgram))
+			yield(nil, motmedelErrors.NewWithTrace(nil_error.New("program")))
 			return
 		}
 
 		if ebpfMap == nil {
-			yield(nil, motmedelErrors.NewWithTrace(tracingErrors.ErrNilEbpfMap))
+			yield(nil, motmedelErrors.NewWithTrace(nil_error.New("ebpf map")))
 			return
 		}
 
@@ -133,8 +140,8 @@ func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq
 					return
 				}
 
-				base := &ecs.Base{
-					Event: &ecs.Event{
+				base := &schema.Base{
+					Event: &schema.Event{
 						Reason:  "An execve call was made.",
 						Dataset: "tracing.execve",
 					},

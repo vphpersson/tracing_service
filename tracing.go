@@ -13,8 +13,9 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/Motmedel/ecs_go/ecs"
 	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
+	"github.com/Motmedel/utils_go/pkg/schema"
+	schemaLog "github.com/Motmedel/utils_go/pkg/schema/log"
 	motmedelLog "github.com/Motmedel/utils_go/pkg/log"
 	motmedelErrorLogger "github.com/Motmedel/utils_go/pkg/log/error_logger"
 	"github.com/cilium/ebpf/rlimit"
@@ -37,7 +38,7 @@ func main() {
 					&slog.HandlerOptions{
 						AddSource:   false,
 						Level:       slog.LevelInfo,
-						ReplaceAttr: ecs.TimestampReplaceAttr,
+						ReplaceAttr: schemaLog.ReplaceAttr,
 					},
 				),
 				Extractors: []motmedelLog.ContextExtractor{
@@ -84,7 +85,7 @@ func main() {
 		}
 	}()
 
-	iterators := []iter.Seq2[*ecs.Base, error]{
+	iterators := []iter.Seq2[*schema.Base, error]{
 		destroyConnectionTracing.Run(
 			errGroupCtx,
 			objs.BpfPrograms.NfCtHelperDestroy,

@@ -11,24 +11,30 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/Motmedel/ecs_go/ecs"
 	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
+	"github.com/Motmedel/utils_go/pkg/errors/types/nil_error"
+	"github.com/Motmedel/utils_go/pkg/schema"
+	schemaUtils "github.com/Motmedel/utils_go/pkg/schema/utils"
 	"github.com/cilium/ebpf"
-	tracingErrors "github.com/vphpersson/tracing/pkg/errors"
 	"github.com/vphpersson/tracing/pkg/tracing"
 	"github.com/vphpersson/tracing_service/pkg/tracing_service"
 )
 
-func EnrichWithConnectEvent(base *ecs.Base, event *tracing_service.BpfConnectEvent) {
+func EnrichWithConnectEvent(base *schema.Base, event *tracing_service.BpfConnectEvent) error {
 	if base == nil {
-		return
+		return nil
 	}
 
 	if event == nil {
-		return
+		return nil
 	}
 
-	base.Timestamp = tracing.ConvertEbpfTimestampToIso8601(event.TimestampNs, tracing.GetBootTime())
+	bootTime, err := tracing.GetBootTime()
+	if err != nil {
+		return fmt.Errorf("get boot time: %w", err)
+	}
+
+	base.Timestamp = tracing.ConvertEbpfTimestampToIso8601(event.TimestampNs, bootTime)
 
 	tracing.EnrichWithConnectionInformationTransport(
 		base,
@@ -53,7 +59,7 @@ func EnrichWithConnectEvent(base *ecs.Base, event *tracing_service.BpfConnectEve
 
 	ecsProcess := base.Process
 	if ecsProcess == nil {
-		ecsProcess = &ecs.Process{}
+		ecsProcess = &schema.Process{}
 		base.Process = ecsProcess
 	}
 
@@ -79,7 +85,7 @@ func EnrichWithConnectEvent(base *ecs.Base, event *tracing_service.BpfConnectEve
 
 	ecsProcessParent := ecsProcess.Parent
 	if ecsProcessParent == nil {
-		ecsProcessParent = &ecs.Process{}
+		ecsProcessParent = &schema.Process{}
 		ecsProcess.Parent = ecsProcessParent
 	}
 
@@ -106,15 +112,15 @@ func EnrichWithConnectEvent(base *ecs.Base, event *tracing_service.BpfConnectEve
 	if event.AddressFamily == uint16(syscall.AF_INET6) {
 		if tracing_service.IsIPv4MappedIPv6(event.SourceAddress) || tracing_service.IsIPv4MappedIPv6(event.DestinationAddress) {
 			if base.Network == nil {
-				base.Network = &ecs.Network{}
+				base.Network = &schema.Network{}
 			}
 			base.Network.Type = "ipv4"
 		}
 	}
 
-	if communityId := ecs.CommunityIdFromTargets(base.Source, base.Destination, int(event.TransportProtocol)); communityId != "" {
+	if communityId := schemaUtils.CommunityIdFromTargets(base.Source, base.Destination, int(event.TransportProtocol)); communityId != "" {
 		if base.Network == nil {
-			base.Network = &ecs.Network{}
+			base.Network = &schema.Network{}
 		}
 		base.Network.CommunityId = append(base.Network.CommunityId, communityId)
 	}
@@ -133,18 +139,20 @@ func EnrichWithConnectEvent(base *ecs.Base, event *tracing_service.BpfConnectEve
 	if p := base.Process; p != nil {
 		executable = p.Executable
 	}
-	base.Message = fmt.Sprintf("connect: %s: %s -> %s %s", executable, srcAddr, dstAddr, transport)
+	base.Message = fmt.Sprintf("%s -> %s %s connect %s", srcAddr, dstAddr, transport, executable)
+
+	return nil
 }
 
-func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq2[*ecs.Base, error] {
-	return func(yield func(*ecs.Base, error) bool) {
+func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq2[*schema.Base, error] {
+	return func(yield func(*schema.Base, error) bool) {
 		if program == nil {
-			yield(nil, motmedelErrors.NewWithTrace(tracingErrors.ErrNilEbpfProgram))
+			yield(nil, motmedelErrors.NewWithTrace(nil_error.New("program")))
 			return
 		}
 
 		if ebpfMap == nil {
-			yield(nil, motmedelErrors.NewWithTrace(tracingErrors.ErrNilEbpfMap))
+			yield(nil, motmedelErrors.NewWithTrace(nil_error.New("ebpf map")))
 			return
 		}
 
@@ -165,8 +173,8 @@ func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq
 					return
 				}
 
-				base := &ecs.Base{
-					Event: &ecs.Event{
+				base := &schema.Base{
+					Event: &schema.Event{
 						Reason:  "A connect call was made.",
 						Dataset: "tracing.connect",
 					},

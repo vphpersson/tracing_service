@@ -3,17 +3,19 @@ package tcp_retransmission
 import (
 	"context"
 	"fmt"
-	"github.com/Motmedel/ecs_go/ecs"
-	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
-	"github.com/cilium/ebpf"
-	tracingErrors "github.com/vphpersson/tracing/pkg/errors"
-	"github.com/vphpersson/tracing/pkg/tracing"
-	"github.com/vphpersson/tracing_service/pkg/tracing_service"
 	"iter"
 	"net"
 	"strconv"
 	"sync"
 	"syscall"
+
+	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
+	"github.com/Motmedel/utils_go/pkg/errors/types/nil_error"
+	"github.com/Motmedel/utils_go/pkg/schema"
+	schemaUtils "github.com/Motmedel/utils_go/pkg/schema/utils"
+	"github.com/cilium/ebpf"
+	"github.com/vphpersson/tracing/pkg/tracing"
+	"github.com/vphpersson/tracing_service/pkg/tracing_service"
 )
 
 var tcpStateNames = map[uint16]string{
@@ -31,16 +33,21 @@ var tcpStateNames = map[uint16]string{
 	12: "NEW_SYN_RECV",
 }
 
-func EnrichWithTcpRetransmissionEvent(base *ecs.Base, event *tracing_service.BpfTcpRetransmissionEvent) {
+func EnrichWithTcpRetransmissionEvent(base *schema.Base, event *tracing_service.BpfTcpRetransmissionEvent) error {
 	if base == nil {
-		return
+		return nil
 	}
 
 	if event == nil {
-		return
+		return nil
 	}
 
-	base.Timestamp = tracing.ConvertEbpfTimestampToIso8601(event.TimestampNs, tracing.GetBootTime())
+	bootTime, err := tracing.GetBootTime()
+	if err != nil {
+		return fmt.Errorf("get boot time: %w", err)
+	}
+
+	base.Timestamp = tracing.ConvertEbpfTimestampToIso8601(event.TimestampNs, bootTime)
 
 	tracing.EnrichWithConnectionInformationTransport(
 		base,
@@ -57,7 +64,7 @@ func EnrichWithTcpRetransmissionEvent(base *ecs.Base, event *tracing_service.Bpf
 		stateSuffix = stateName
 		ecsTcp := base.Tcp
 		if ecsTcp == nil {
-			ecsTcp = &ecs.Tcp{}
+			ecsTcp = &schema.Tcp{}
 			base.Tcp = ecsTcp
 		}
 		ecsTcp.State = stateName
@@ -66,15 +73,15 @@ func EnrichWithTcpRetransmissionEvent(base *ecs.Base, event *tracing_service.Bpf
 	if event.AddressFamily == uint16(syscall.AF_INET6) {
 		if tracing_service.IsIPv4MappedIPv6(event.SourceAddress) || tracing_service.IsIPv4MappedIPv6(event.DestinationAddress) {
 			if base.Network == nil {
-				base.Network = &ecs.Network{}
+				base.Network = &schema.Network{}
 			}
 			base.Network.Type = "ipv4"
 		}
 	}
 
-	if communityId := ecs.CommunityIdFromTargets(base.Source, base.Destination, 6); communityId != "" {
+	if communityId := schemaUtils.CommunityIdFromTargets(base.Source, base.Destination, 6); communityId != "" {
 		if base.Network == nil {
-			base.Network = &ecs.Network{}
+			base.Network = &schema.Network{}
 		}
 		base.Network.CommunityId = append(base.Network.CommunityId, communityId)
 	}
@@ -86,19 +93,27 @@ func EnrichWithTcpRetransmissionEvent(base *ecs.Base, event *tracing_service.Bpf
 	if d := base.Destination; d != nil {
 		dstAddr = net.JoinHostPort(d.Ip, strconv.Itoa(d.Port))
 	}
-	base.Message = fmt.Sprintf("tcp_retransmission: %s -> %s %s", srcAddr, dstAddr, stateSuffix)
+
+	base.Message = fmt.Sprintf("%s -> %s tcp tcp_retransmission %s", srcAddr, dstAddr, stateSuffix)
+
+	return nil
 }
 
-func EnrichWithTcpRetransmissionSynAckEvent(base *ecs.Base, event *tracing_service.BpfTcpRetransmissionSynackEvent) {
+func EnrichWithTcpRetransmissionSynAckEvent(base *schema.Base, event *tracing_service.BpfTcpRetransmissionSynackEvent) error {
 	if base == nil {
-		return
+		return nil
 	}
 
 	if event == nil {
-		return
+		return nil
 	}
 
-	base.Timestamp = tracing.ConvertEbpfTimestampToIso8601(event.TimestampNs, tracing.GetBootTime())
+	bootTime, err := tracing.GetBootTime()
+	if err != nil {
+		return fmt.Errorf("get boot time: %w", err)
+	}
+
+	base.Timestamp = tracing.ConvertEbpfTimestampToIso8601(event.TimestampNs, bootTime)
 
 	tracing.EnrichWithConnectionInformationTransport(
 		base,
@@ -113,15 +128,15 @@ func EnrichWithTcpRetransmissionSynAckEvent(base *ecs.Base, event *tracing_servi
 	if event.AddressFamily == uint16(syscall.AF_INET6) {
 		if tracing_service.IsIPv4MappedIPv6(event.SourceAddress) || tracing_service.IsIPv4MappedIPv6(event.DestinationAddress) {
 			if base.Network == nil {
-				base.Network = &ecs.Network{}
+				base.Network = &schema.Network{}
 			}
 			base.Network.Type = "ipv4"
 		}
 	}
 
-	if communityId := ecs.CommunityIdFromTargets(base.Source, base.Destination, 6); communityId != "" {
+	if communityId := schemaUtils.CommunityIdFromTargets(base.Source, base.Destination, 6); communityId != "" {
 		if base.Network == nil {
-			base.Network = &ecs.Network{}
+			base.Network = &schema.Network{}
 		}
 		base.Network.CommunityId = append(base.Network.CommunityId, communityId)
 	}
@@ -133,18 +148,21 @@ func EnrichWithTcpRetransmissionSynAckEvent(base *ecs.Base, event *tracing_servi
 	if d := base.Destination; d != nil {
 		dstAddr = net.JoinHostPort(d.Ip, strconv.Itoa(d.Port))
 	}
-	base.Message = fmt.Sprintf("tcp_retransmission_synack: %s -> %s", srcAddr, dstAddr)
+
+	base.Message = fmt.Sprintf("%s -> %s tcp tcp_retransmission_synack", srcAddr, dstAddr)
+
+	return nil
 }
 
-func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq2[*ecs.Base, error] {
-	return func(yield func(*ecs.Base, error) bool) {
+func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq2[*schema.Base, error] {
+	return func(yield func(*schema.Base, error) bool) {
 		if program == nil {
-			yield(nil, motmedelErrors.NewWithTrace(tracingErrors.ErrNilEbpfProgram))
+			yield(nil, motmedelErrors.NewWithTrace(nil_error.New("program")))
 			return
 		}
 
 		if ebpfMap == nil {
-			yield(nil, motmedelErrors.NewWithTrace(tracingErrors.ErrNilEbpfMap))
+			yield(nil, motmedelErrors.NewWithTrace(nil_error.New("ebpf map")))
 			return
 		}
 
@@ -167,8 +185,8 @@ func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq
 					return
 				}
 
-				base := &ecs.Base{
-					Event: &ecs.Event{
+				base := &schema.Base{
+					Event: &schema.Event{
 						Reason:  "A TCP retransmission was performed.",
 						Dataset: "tracing.tcp_retransmit_skb",
 					},

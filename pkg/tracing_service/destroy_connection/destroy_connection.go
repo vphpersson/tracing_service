@@ -3,10 +3,11 @@ package destroy_connection
 import (
 	"context"
 	"fmt"
-	"github.com/Motmedel/ecs_go/ecs"
 	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
+	"github.com/Motmedel/utils_go/pkg/errors/types/nil_error"
+	"github.com/Motmedel/utils_go/pkg/schema"
+	schemaUtils "github.com/Motmedel/utils_go/pkg/schema/utils"
 	"github.com/cilium/ebpf"
-	tracingErrors "github.com/vphpersson/tracing/pkg/errors"
 	"github.com/vphpersson/tracing/pkg/tracing"
 	"github.com/vphpersson/tracing_service/pkg/tracing_service"
 	"iter"
@@ -91,16 +92,21 @@ func translateStatusBits(status int) []string {
 	return names
 }
 
-func EnrichWithDestroyConnectionEvent(base *ecs.Base, event *tracing_service.BpfDestroyConnectionEvent) {
+func EnrichWithDestroyConnectionEvent(base *schema.Base, event *tracing_service.BpfDestroyConnectionEvent) error {
 	if base == nil {
-		return
+		return nil
 	}
 
 	if event == nil {
-		return
+		return nil
 	}
 
-	base.Timestamp = tracing.ConvertEbpfTimestampToIso8601(event.TimestampNs, tracing.GetBootTime())
+	bootTime, err := tracing.GetBootTime()
+	if err != nil {
+		return fmt.Errorf("get boot time: %w", err)
+	}
+
+	base.Timestamp = tracing.ConvertEbpfTimestampToIso8601(event.TimestampNs, bootTime)
 
 	tracing.EnrichWithConnectionInformationTransport(
 		base,
@@ -115,7 +121,7 @@ func EnrichWithDestroyConnectionEvent(base *ecs.Base, event *tracing_service.Bpf
 	if event.Start != 0 || event.Stop != 0 {
 		ecsEvent := base.Event
 		if ecsEvent == nil {
-			ecsEvent = &ecs.Event{}
+			ecsEvent = &schema.Event{}
 			base.Event = ecsEvent
 		}
 
@@ -134,7 +140,7 @@ func EnrichWithDestroyConnectionEvent(base *ecs.Base, event *tracing_service.Bpf
 	if event.TransportProtocol == 6 && ok {
 		ecsTcp := base.Tcp
 		if ecsTcp == nil {
-			ecsTcp = &ecs.Tcp{}
+			ecsTcp = &schema.Tcp{}
 			base.Tcp = ecsTcp
 		}
 		ecsTcp.State = tcpStateName
@@ -153,15 +159,15 @@ func EnrichWithDestroyConnectionEvent(base *ecs.Base, event *tracing_service.Bpf
 	if event.AddressFamily == uint16(syscall.AF_INET6) {
 		if tracing_service.IsIPv4MappedIPv6(event.SourceAddress) || tracing_service.IsIPv4MappedIPv6(event.DestinationAddress) {
 			if base.Network == nil {
-				base.Network = &ecs.Network{}
+				base.Network = &schema.Network{}
 			}
 			base.Network.Type = "ipv4"
 		}
 	}
 
-	if communityId := ecs.CommunityIdFromTargets(base.Source, base.Destination, int(event.TransportProtocol)); communityId != "" {
+	if communityId := schemaUtils.CommunityIdFromTargets(base.Source, base.Destination, int(event.TransportProtocol)); communityId != "" {
 		if base.Network == nil {
-			base.Network = &ecs.Network{}
+			base.Network = &schema.Network{}
 		}
 		base.Network.CommunityId = append(base.Network.CommunityId, communityId)
 	}
@@ -176,18 +182,20 @@ func EnrichWithDestroyConnectionEvent(base *ecs.Base, event *tracing_service.Bpf
 	if n := base.Network; n != nil {
 		transport = n.Transport
 	}
-	base.Message = fmt.Sprintf("destroy_connection: %s -> %s %s", srcAddr, dstAddr, transport)
+	base.Message = fmt.Sprintf("%s -> %s %s destroy_connection", srcAddr, dstAddr, transport)
+
+	return nil
 }
 
-func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq2[*ecs.Base, error] {
-	return func(yield func(*ecs.Base, error) bool) {
+func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq2[*schema.Base, error] {
+	return func(yield func(*schema.Base, error) bool) {
 		if program == nil {
-			yield(nil, motmedelErrors.NewWithTrace(tracingErrors.ErrNilEbpfProgram))
+			yield(nil, motmedelErrors.NewWithTrace(nil_error.New("program")))
 			return
 		}
 
 		if ebpfMap == nil {
-			yield(nil, motmedelErrors.NewWithTrace(tracingErrors.ErrNilEbpfMap))
+			yield(nil, motmedelErrors.NewWithTrace(nil_error.New("ebpf map")))
 			return
 		}
 
@@ -208,8 +216,8 @@ func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq
 					return
 				}
 
-				base := &ecs.Base{
-					Event: &ecs.Event{
+				base := &schema.Base{
+					Event: &schema.Event{
 						Reason:  "A connection was destroyed by Conntrack.",
 						Dataset: "tracing.destroy_connection",
 					},

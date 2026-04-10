@@ -621,6 +621,22 @@ int trace_kfree_skb(struct trace_event_raw_kfree_skb *ctx) {
     __u16 transport_header = BPF_CORE_READ(skb, transport_header);
     __u16 eth_protocol = bpf_ntohs(ctx->protocol);
 
+    // skb->protocol can be unset for locally-generated packets dropped
+    // before the protocol field is assigned (e.g. IP_OUTNOROUTES). Fall
+    // back to sniffing the IP version from the network header's version
+    // nibble.
+    if (eth_protocol != ETH_P_IP && eth_protocol != ETH_P_IPV6 &&
+        network_header != (__u16)~0U) {
+        __u8 first_byte = 0;
+        if (bpf_probe_read_kernel(&first_byte, 1, head + network_header) == 0) {
+            __u8 version = first_byte >> 4;
+            if (version == 4)
+                eth_protocol = ETH_P_IP;
+            else if (version == 6)
+                eth_protocol = ETH_P_IPV6;
+        }
+    }
+
     __u8 transport_protocol = 0;
 
     if (eth_protocol == ETH_P_IP) {
@@ -630,6 +646,9 @@ int trace_kfree_skb(struct trace_event_raw_kfree_skb *ctx) {
             __builtin_memcpy(&event->source_address, &iph.saddr, sizeof(iph.saddr));
             __builtin_memcpy(&event->destination_address, &iph.daddr, sizeof(iph.daddr));
             transport_protocol = iph.protocol;
+            // Compute transport_header from the IP header when not set.
+            if (transport_header == (__u16)~0U)
+                transport_header = network_header + (iph.ihl * 4);
         }
     } else if (eth_protocol == ETH_P_IPV6) {
         event->address_family = bpf_htons(AF_INET6);
@@ -638,6 +657,9 @@ int trace_kfree_skb(struct trace_event_raw_kfree_skb *ctx) {
             __builtin_memcpy(&event->source_address, &ip6h.saddr, sizeof(ip6h.saddr));
             __builtin_memcpy(&event->destination_address, &ip6h.daddr, sizeof(ip6h.daddr));
             transport_protocol = ip6h.nexthdr;
+            // IPv6 fixed header is always 40 bytes.
+            if (transport_header == (__u16)~0U)
+                transport_header = network_header + 40;
         }
     }
 
