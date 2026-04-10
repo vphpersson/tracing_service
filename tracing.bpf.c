@@ -82,7 +82,7 @@ struct exec_info {
 
 SEC("tracepoint/syscalls/sys_enter_execve")
 s32 enter_execve(struct exec_info *execve_ctx) {
-    u64 timestamp_ns = bpf_cpu_to_be64(bpf_ktime_get_boot_ns());
+    u64 timestamp_ns = bpf_ktime_get_boot_ns();
 
     struct execve_event *event;
     event = bpf_ringbuf_reserve(&execve_events, sizeof(struct execve_event), 0);
@@ -99,12 +99,12 @@ s32 enter_execve(struct exec_info *execve_ctx) {
     event->timestamp_ns = timestamp_ns;
 
     u64 uid_gid = bpf_get_current_uid_gid();
-    event->user_id = bpf_htonl((u32) uid_gid);
-    event->group_id = bpf_htonl(uid_gid >> 32);
+    event->user_id = (u32) uid_gid;
+    event->group_id = uid_gid >> 32;
 
-    event->process_id = bpf_htonl(bpf_get_current_pid_tgid() >> 32);
+    event->process_id = bpf_get_current_pid_tgid() >> 32;
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-    event->parent_process_id = bpf_htonl(BPF_CORE_READ(task, real_parent, pid));
+    event->parent_process_id = BPF_CORE_READ(task, real_parent, pid);
     bpf_get_current_comm(&event->process_title, TASK_COMM_LEN);
 
     struct task_struct *parent = BPF_CORE_READ(task, real_parent);
@@ -198,7 +198,7 @@ static struct connect_event zero_connect_event SEC(".rodata") = {};
 
 SEC("fentry/tcp_connect")
 int BPF_PROG(tcp_connect, struct sock *sk) {
-    u64 timestamp_ns = bpf_cpu_to_be64(bpf_ktime_get_boot_ns());
+    u64 timestamp_ns = bpf_ktime_get_boot_ns();
 
     struct connect_event *event;
     event = bpf_ringbuf_reserve(&connect_events, sizeof(struct connect_event), 0);
@@ -215,12 +215,12 @@ int BPF_PROG(tcp_connect, struct sock *sk) {
     event->timestamp_ns = timestamp_ns;
 
     u64 uid_gid = bpf_get_current_uid_gid();
-	event->user_id = bpf_htonl((u32) uid_gid);
-    event->group_id = bpf_htonl(uid_gid >> 32);
+	event->user_id = (u32) uid_gid;
+    event->group_id = uid_gid >> 32;
 
-    event->process_id = bpf_htonl(bpf_get_current_pid_tgid() >> 32);
+    event->process_id = bpf_get_current_pid_tgid() >> 32;
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-    event->parent_process_id = bpf_htonl(BPF_CORE_READ(task, real_parent, pid));
+    event->parent_process_id = BPF_CORE_READ(task, real_parent, pid);
 	bpf_get_current_comm(&event->process_title, TASK_COMM_LEN);
 
     struct mm_struct *mm = BPF_CORE_READ(task, mm);
@@ -262,10 +262,10 @@ int BPF_PROG(tcp_connect, struct sock *sk) {
         bpf_probe_read_kernel(&event->destination_address, sizeof(event->destination_address), &sk->__sk_common.skc_v6_daddr.in6_u.u6_addr32);
     }
 
-	event->source_port = bpf_htons(sk->__sk_common.skc_num);
-	event->destination_port = sk->__sk_common.skc_dport;
+	event->source_port = sk->__sk_common.skc_num;
+	event->destination_port = bpf_ntohs(sk->__sk_common.skc_dport);
 
-    event->address_family = bpf_htons(sk->__sk_common.skc_family);
+    event->address_family = sk->__sk_common.skc_family;
     bpf_probe_read_kernel(&event->transport_protocol, sizeof(event->transport_protocol), &sk->sk_protocol);
 
 	bpf_ringbuf_submit(event, 0);
@@ -313,7 +313,7 @@ int trace_inet_sock_set_state(struct trace_event_raw_inet_sock_set_state *ctx) {
         ctx->oldstate != TCP_ESTABLISHED)
         return 0;
 
-    u64 timestamp_ns = bpf_cpu_to_be64(bpf_ktime_get_boot_ns());
+    u64 timestamp_ns = bpf_ktime_get_boot_ns();
 
     struct tcp_set_state_event *event;
     event = bpf_ringbuf_reserve(&tcp_set_state_events, sizeof(struct tcp_set_state_event), 0);
@@ -333,11 +333,11 @@ int trace_inet_sock_set_state(struct trace_event_raw_inet_sock_set_state *ctx) {
         bpf_probe_read(&event->destination_address, sizeof(event->destination_address), ctx->daddr_v6);
     }
 
-    event->source_port = bpf_htons(ctx->sport);
-    event->destination_port = bpf_htons(ctx->dport);
-    event->address_family = bpf_htons(ctx->family);
-    event->old_state = bpf_htons((__u16)ctx->oldstate);
-    event->new_state = bpf_htons((__u16)ctx->newstate);
+    event->source_port = ctx->sport;
+    event->destination_port = ctx->dport;
+    event->address_family = ctx->family;
+    event->old_state = (__u16)ctx->oldstate;
+    event->new_state = (__u16)ctx->newstate;
 
     bpf_ringbuf_submit(event, 0);
 
@@ -370,7 +370,7 @@ struct destroy_connection_event *unused4 __attribute__((unused));
 
 SEC("fentry/nf_ct_helper_destroy")
 int BPF_PROG(nf_ct_helper_destroy, struct nf_conn *ct) {
-    u64 timestamp_ns = bpf_cpu_to_be64(bpf_ktime_get_boot_ns());
+    u64 timestamp_ns = bpf_ktime_get_boot_ns();
 
     struct nf_conntrack_tuple *tuple = &ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple;
 
@@ -397,7 +397,7 @@ int BPF_PROG(nf_ct_helper_destroy, struct nf_conn *ct) {
 
     event->timestamp_ns = timestamp_ns;
 
-    event->address_family = bpf_htons(tuple->src.l3num);
+    event->address_family = tuple->src.l3num;
 
     if (tuple->src.l3num == AF_INET) {
         bpf_probe_read_kernel(&event->source_address, sizeof(event->source_address), &tuple->src.u3.ip);
@@ -410,19 +410,19 @@ int BPF_PROG(nf_ct_helper_destroy, struct nf_conn *ct) {
     event->transport_protocol = tuple->dst.protonum;
 
     if (tuple->dst.protonum == 6) {
-        event->source_port = tuple->src.u.tcp.port;
-        event->destination_port = tuple->dst.u.tcp.port;
+        event->source_port = bpf_ntohs(tuple->src.u.tcp.port);
+        event->destination_port = bpf_ntohs(tuple->dst.u.tcp.port);
 
         struct ip_ct_tcp *tcp = &ct->proto.tcp;
         event->tcp_state = tcp->state;
         event->tcp_last_direction = tcp->last_dir;
     } else if (tuple->dst.protonum == 17) {
-        event->source_port = tuple->src.u.udp.port;
-        event->destination_port = tuple->dst.u.udp.port;
+        event->source_port = bpf_ntohs(tuple->src.u.udp.port);
+        event->destination_port = bpf_ntohs(tuple->dst.u.udp.port);
     }
 
-    event->conntrack_status_mask = bpf_htonl(ct->status);
-    event->timeout = bpf_htonl(ct->timeout);
+    event->conntrack_status_mask = ct->status;
+    event->timeout = ct->timeout;
 
     struct nf_ct_ext ext;
     bpf_probe_read_kernel(&ext, sizeof(ext), (void*) ct->ext);
@@ -430,8 +430,8 @@ int BPF_PROG(nf_ct_helper_destroy, struct nf_conn *ct) {
     struct nf_conn_tstamp ct_ts;
     bpf_probe_read_kernel(&ct_ts, sizeof(ct_ts), (void*) ct->ext + ext.offset[NF_CT_EXT_TSTAMP]);
 
-    event->start = bpf_cpu_to_be64(ct_ts.start);
-    event->stop = bpf_cpu_to_be64(ct_ts.stop);
+    event->start = ct_ts.start;
+    event->stop = ct_ts.stop;
 
     bpf_ringbuf_submit(event, 0);
 
@@ -473,7 +473,7 @@ struct tcp_retransmission_event *unused5 __attribute__((unused));
 
 SEC("tracepoint/tcp/tcp_retransmit_skb")
 int tcp_retransmit_skb(struct tcp_retransmit_skb_ctx *ctx) {
-    u64 timestamp_ns = bpf_cpu_to_be64(bpf_ktime_get_boot_ns());
+    u64 timestamp_ns = bpf_ktime_get_boot_ns();
 
     struct tcp_retransmission_event *event;
     event = bpf_ringbuf_reserve(&tcp_retransmission_events, sizeof(struct tcp_retransmission_event), 0);
@@ -493,10 +493,10 @@ int tcp_retransmit_skb(struct tcp_retransmit_skb_ctx *ctx) {
         bpf_probe_read(&event->destination_address, sizeof(event->destination_address), ctx->daddr_v6);
     }
 
-    event->source_port = bpf_htons(ctx->sport);
-    event->destination_port = bpf_htons(ctx->dport);
-    event->address_family = bpf_htons(ctx->family);
-    event->state = bpf_htons((__u16)ctx->state);
+    event->source_port = ctx->sport;
+    event->destination_port = ctx->dport;
+    event->address_family = ctx->family;
+    event->state = (__u16)ctx->state;
 
     bpf_ringbuf_submit(event, 0);
 
@@ -523,7 +523,7 @@ struct tcp_retransmission_synack_event *unused6 __attribute__((unused));
 
 SEC("tp/tcp/tcp_retransmit_synack")
 int tcp_retransmit_synack(struct trace_event_raw_tcp_retransmit_synack *ctx) {
-    u64 timestamp_ns = bpf_cpu_to_be64(bpf_ktime_get_boot_ns());
+    u64 timestamp_ns = bpf_ktime_get_boot_ns();
 
     struct tcp_retransmission_synack_event *event;
     event = bpf_ringbuf_reserve(&tcp_retransmission_synack_events, sizeof(struct tcp_retransmission_synack_event), 0);
@@ -543,9 +543,9 @@ int tcp_retransmit_synack(struct trace_event_raw_tcp_retransmit_synack *ctx) {
         bpf_probe_read(&event->destination_address, sizeof(event->destination_address), ctx->daddr_v6);
     }
 
-    event->source_port = bpf_htons(ctx->sport);
-    event->destination_port = bpf_htons(ctx->dport);
-    event->address_family = bpf_htons(ctx->family);
+    event->source_port = ctx->sport;
+    event->destination_port = ctx->dport;
+    event->address_family = ctx->family;
 
     bpf_ringbuf_submit(event, 0);
 
@@ -589,7 +589,7 @@ struct packet_drop_event *unused7 __attribute__((unused));
 
 SEC("tracepoint/skb/kfree_skb")
 int trace_kfree_skb(struct trace_event_raw_kfree_skb *ctx) {
-    u64 timestamp_ns = bpf_cpu_to_be64(bpf_ktime_get_boot_ns());
+    u64 timestamp_ns = bpf_ktime_get_boot_ns();
 
     __u16 reason = ctx->reason;
 
@@ -606,7 +606,7 @@ int trace_kfree_skb(struct trace_event_raw_kfree_skb *ctx) {
     __builtin_memset(event, 0, sizeof(*event));
 
     event->timestamp_ns = timestamp_ns;
-    event->reason = bpf_htons(reason);
+    event->reason = reason;
     event->location = (u64)ctx->location;
 
     struct sk_buff *skb;
@@ -640,7 +640,7 @@ int trace_kfree_skb(struct trace_event_raw_kfree_skb *ctx) {
     __u8 transport_protocol = 0;
 
     if (eth_protocol == ETH_P_IP) {
-        event->address_family = bpf_htons(AF_INET);
+        event->address_family = AF_INET;
         struct iphdr iph;
         if (bpf_probe_read_kernel(&iph, sizeof(iph), head + network_header) == 0) {
             __builtin_memcpy(&event->source_address, &iph.saddr, sizeof(iph.saddr));
@@ -651,7 +651,7 @@ int trace_kfree_skb(struct trace_event_raw_kfree_skb *ctx) {
                 transport_header = network_header + (iph.ihl * 4);
         }
     } else if (eth_protocol == ETH_P_IPV6) {
-        event->address_family = bpf_htons(AF_INET6);
+        event->address_family = AF_INET6;
         struct ipv6hdr ip6h;
         if (bpf_probe_read_kernel(&ip6h, sizeof(ip6h), head + network_header) == 0) {
             __builtin_memcpy(&event->source_address, &ip6h.saddr, sizeof(ip6h.saddr));
@@ -669,14 +669,14 @@ int trace_kfree_skb(struct trace_event_raw_kfree_skb *ctx) {
         if (transport_protocol == IPPROTO_TCP) {
             struct tcphdr tcph;
             if (bpf_probe_read_kernel(&tcph, sizeof(tcph), head + transport_header) == 0) {
-                event->source_port = tcph.source;
-                event->destination_port = tcph.dest;
+                event->source_port = bpf_ntohs(tcph.source);
+                event->destination_port = bpf_ntohs(tcph.dest);
             }
         } else if (transport_protocol == IPPROTO_UDP) {
             struct udphdr udph;
             if (bpf_probe_read_kernel(&udph, sizeof(udph), head + transport_header) == 0) {
-                event->source_port = udph.source;
-                event->destination_port = udph.dest;
+                event->source_port = bpf_ntohs(udph.source);
+                event->destination_port = bpf_ntohs(udph.dest);
             }
         }
     }
@@ -710,7 +710,7 @@ struct {
 
 SEC("tracepoint/syscalls/sys_enter_openat")
 int trace_openat(struct trace_event_raw_sys_enter* ctx) {
-    u64 timestamp_ns = bpf_cpu_to_be64(bpf_ktime_get_boot_ns());
+    u64 timestamp_ns = bpf_ktime_get_boot_ns();
 
     struct file_open_event *event;
     event = bpf_ringbuf_reserve(&file_open_events, sizeof(*event), 0);
@@ -722,13 +722,13 @@ int trace_openat(struct trace_event_raw_sys_enter* ctx) {
     event->timestamp_ns = timestamp_ns;
 
     u64 uid_gid = bpf_get_current_uid_gid();
-    event->user_id = bpf_htonl((u32) uid_gid);
-    event->group_id = bpf_htonl(uid_gid >> 32);
+    event->user_id = (u32) uid_gid;
+    event->group_id = uid_gid >> 32;
 
-    event->process_id = bpf_htonl(bpf_get_current_pid_tgid() >> 32);
+    event->process_id = bpf_get_current_pid_tgid() >> 32;
 
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-    event->parent_process_id = bpf_htonl(BPF_CORE_READ(task, real_parent, pid));
+    event->parent_process_id = BPF_CORE_READ(task, real_parent, pid);
 
     bpf_get_current_comm(&event->process_title, TASK_COMM_LEN);
 
