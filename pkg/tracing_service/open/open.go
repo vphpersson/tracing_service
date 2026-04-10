@@ -1,6 +1,7 @@
 package open
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"github.com/Motmedel/ecs_go/ecs"
@@ -10,8 +11,54 @@ import (
 	"github.com/vphpersson/tracing/pkg/tracing"
 	"github.com/vphpersson/tracing_service/pkg/tracing_service"
 	"iter"
+	"path/filepath"
 	"sync"
 )
+
+func EnrichWithFileOpenEvent(base *ecs.Base, event *tracing_service.BpfFileOpenEvent) {
+	if base == nil {
+		return
+	}
+
+	if event == nil {
+		return
+	}
+
+	base.Timestamp = tracing.ConvertEbpfTimestampToIso8601(event.TimestampNs, tracing.GetBootTime())
+
+	tracing.EnrichWithProcessInformation(
+		base,
+		event.ProcessId,
+		event.ProcessTitle,
+		event.ParentProcessId,
+		event.UserId,
+		event.GroupId,
+	)
+
+	filename := string(bytes.TrimRight(event.Filename[:], "\x00"))
+
+	if filename != "" {
+		ecsFile := base.File
+		if ecsFile == nil {
+			ecsFile = &ecs.File{}
+			base.File = ecsFile
+		}
+
+		ecsFile.Path = filename
+		ecsFile.Name = filepath.Base(filename)
+		ecsFile.Directory = filepath.Dir(filename)
+		if ext := filepath.Ext(filename); ext != "" {
+			ecsFile.Extension = ext[1:]
+		}
+	}
+
+	processTitle := ""
+	if ecsProcess := base.Process; ecsProcess != nil {
+		processTitle = ecsProcess.Title
+	}
+
+	base.Message = fmt.Sprintf("%s opened %q", processTitle, filename)
+}
 
 func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq2[*ecs.Base, error] {
 	return func(yield func(*ecs.Base, error) bool) {
@@ -51,7 +98,7 @@ func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq
 					},
 				}
 
-				// TODO: Enrich
+				EnrichWithFileOpenEvent(base, event)
 
 				mu.Lock()
 				defer mu.Unlock()

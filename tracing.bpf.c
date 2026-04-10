@@ -14,6 +14,8 @@ struct nf_conn_tstamp {
 #define TASK_COMM_LEN 16
 #define AF_INET 2
 #define AF_INET6 10
+#define EXE_NAME_LEN 256
+#define CMDLINE_LEN 256
 
 char __license[] SEC("license") = "Dual MIT/GPL";
 
@@ -41,6 +43,9 @@ struct execve_event {
 	u8  argv[ARGLEN][ARGSIZE];
 	// set to ARGLEN + 1 if there were more than ARGLEN arguments
 	u32 argc;
+
+    u8 parent_executable_name[EXE_NAME_LEN];
+    u8 parent_command_line[CMDLINE_LEN];
 };
 struct execve_event *unused2 __attribute__((unused));
 
@@ -57,6 +62,9 @@ static struct execve_event zero_execve_event SEC(".rodata") = {
     .filename = {0},
     .argv = {},
     .argc = 0,
+
+    .parent_executable_name = {0},
+    .parent_command_line = {0},
 };
 
 struct exec_info {
@@ -76,17 +84,14 @@ SEC("tracepoint/syscalls/sys_enter_execve")
 s32 enter_execve(struct exec_info *execve_ctx) {
     u64 timestamp_ns = bpf_cpu_to_be64(bpf_ktime_get_boot_ns());
 
-	struct execve_event *event;
-	event = bpf_ringbuf_reserve(&execve_events, sizeof(struct execve_event), 0);
-	if (!event) {
-//		LOG0("could not reserve events ringbuf memory");
-		return 1;
-	}
+    struct execve_event *event;
+    event = bpf_ringbuf_reserve(&execve_events, sizeof(struct execve_event), 0);
+    if (!event) {
+        return 1;
+    }
 
-    // Zero out the event for safety. If we don't do this, we risk sending random kernel memory back to userspace.
     s32 ret = bpf_probe_read_kernel(event, sizeof(*event), &zero_execve_event);
     if (ret) {
-//        LOG1("zero out event: %d", ret);
         bpf_ringbuf_discard(event, 0);
         return 1;
     }
@@ -102,41 +107,55 @@ s32 enter_execve(struct exec_info *execve_ctx) {
     event->parent_process_id = bpf_htonl(BPF_CORE_READ(task, real_parent, pid));
     bpf_get_current_comm(&event->process_title, TASK_COMM_LEN);
 
+    struct task_struct *parent = BPF_CORE_READ(task, real_parent);
+    struct mm_struct *parent_mm = BPF_CORE_READ(parent, mm);
+    if (parent_mm) {
+        const u8 *parent_exe = BPF_CORE_READ(parent_mm, exe_file, f_path.dentry, d_name.name);
+        bpf_probe_read_kernel_str(&event->parent_executable_name, sizeof(event->parent_executable_name), parent_exe);
+
+        unsigned long parent_arg_start = BPF_CORE_READ(parent_mm, arg_start);
+        unsigned long parent_arg_end = BPF_CORE_READ(parent_mm, arg_end);
+        unsigned long parent_arg_len = parent_arg_end - parent_arg_start;
+        if (parent_arg_len > sizeof(event->parent_command_line)) {
+            parent_arg_len = sizeof(event->parent_command_line);
+        }
+        parent_arg_len &= (sizeof(event->parent_command_line) - 1);
+        bpf_probe_read_user(&event->parent_command_line, parent_arg_len, (void *)parent_arg_start);
+    }
+
     // Write the filename in addition to argv[0] because the filename contains the full path to the file which could
     // be more useful in some situations.
     ret = bpf_probe_read_user_str(&event->filename, sizeof(event->filename), execve_ctx->filename);
     if (ret < 0) {
-//        LOG1("could not read filename into event struct: %d", ret);
         bpf_ringbuf_discard(event, 0);
         return 1;
     }
 
     for (u32 i = 0; i < ARGLEN; i++) {
         if (!(&execve_ctx->argv[i])) {
-            goto out;
+            goto done;
         }
 
         const u8 *argp = NULL;
         ret = bpf_probe_read_user(&argp, sizeof(argp), &execve_ctx->argv[i]);
         if (ret || !argp) {
-            goto out;
+            goto done;
         }
 
         ret = bpf_probe_read_user_str(event->argv[i], sizeof(event->argv[i]), argp);
         if (ret < 0) {
-//            LOG2("read argv %u: %d", i, ret);
-            goto out;
+            goto done;
         }
 
         event->argc++;
     }
 
-    // This won't get hit if we `goto out` in the loop above. This is to signify
+    // This won't get hit if we `goto done` in the loop above. This is to signify
     // to userspace that we couldn't copy all of the arguments because it
     // exceeded ARGLEN.
     event->argc++;
 
-out:
+done:
     bpf_ringbuf_submit(event, 0);
 
     return 0;
@@ -166,8 +185,16 @@ struct connect_event {
     __u16 destination_port;
     __u16 address_family;
     u8 transport_protocol;
+
+    u8 executable_name[EXE_NAME_LEN];
+    u8 command_line[CMDLINE_LEN];
+
+    u8 parent_executable_name[EXE_NAME_LEN];
+    u8 parent_command_line[CMDLINE_LEN];
 };
 struct connect_event *unused __attribute__((unused));
+
+static struct connect_event zero_connect_event SEC(".rodata") = {};
 
 SEC("fentry/tcp_connect")
 int BPF_PROG(tcp_connect, struct sock *sk) {
@@ -179,7 +206,11 @@ int BPF_PROG(tcp_connect, struct sock *sk) {
         return 0;
     }
 
-    __builtin_memset(event, 0, sizeof(*event));
+    s32 zero_ret = bpf_probe_read_kernel(event, sizeof(*event), &zero_connect_event);
+    if (zero_ret) {
+        bpf_ringbuf_discard(event, 0);
+        return 0;
+    }
 
     event->timestamp_ns = timestamp_ns;
 
@@ -191,6 +222,37 @@ int BPF_PROG(tcp_connect, struct sock *sk) {
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
     event->parent_process_id = bpf_htonl(BPF_CORE_READ(task, real_parent, pid));
 	bpf_get_current_comm(&event->process_title, TASK_COMM_LEN);
+
+    struct mm_struct *mm = BPF_CORE_READ(task, mm);
+    if (mm) {
+        const u8 *exe_name = BPF_CORE_READ(mm, exe_file, f_path.dentry, d_name.name);
+        bpf_probe_read_kernel_str(&event->executable_name, sizeof(event->executable_name), exe_name);
+
+        unsigned long arg_start = BPF_CORE_READ(mm, arg_start);
+        unsigned long arg_end = BPF_CORE_READ(mm, arg_end);
+        unsigned long arg_len = arg_end - arg_start;
+        if (arg_len > sizeof(event->command_line)) {
+            arg_len = sizeof(event->command_line);
+        }
+        arg_len &= (sizeof(event->command_line) - 1);
+        bpf_probe_read_user(&event->command_line, arg_len, (void *)arg_start);
+    }
+
+    struct task_struct *parent = BPF_CORE_READ(task, real_parent);
+    struct mm_struct *parent_mm = BPF_CORE_READ(parent, mm);
+    if (parent_mm) {
+        const u8 *parent_exe = BPF_CORE_READ(parent_mm, exe_file, f_path.dentry, d_name.name);
+        bpf_probe_read_kernel_str(&event->parent_executable_name, sizeof(event->parent_executable_name), parent_exe);
+
+        unsigned long parent_arg_start = BPF_CORE_READ(parent_mm, arg_start);
+        unsigned long parent_arg_end = BPF_CORE_READ(parent_mm, arg_end);
+        unsigned long parent_arg_len = parent_arg_end - parent_arg_start;
+        if (parent_arg_len > sizeof(event->parent_command_line)) {
+            parent_arg_len = sizeof(event->parent_command_line);
+        }
+        parent_arg_len &= (sizeof(event->parent_command_line) - 1);
+        bpf_probe_read_user(&event->parent_command_line, parent_arg_len, (void *)parent_arg_start);
+    }
 
     if (sk->__sk_common.skc_family == AF_INET) {
         bpf_probe_read_kernel(&event->source_address, sizeof(event->source_address), &sk->__sk_common.skc_rcv_saddr);
@@ -211,75 +273,76 @@ int BPF_PROG(tcp_connect, struct sock *sk) {
     return 0;
 }
 
-// TCP state
+// TCP set state
 
-//struct {
-//	__uint(type, BPF_MAP_TYPE_RINGBUF);
-//	__uint(max_entries, 1 << 24);
-//} tcp_state_events SEC(".maps");
-//
-//struct tcp_state_event {
-////	unsigned __int128 saddr;
-////	unsigned __int128 daddr;
-//    __u32 saddr_v4;
-//    __u8 saddr_v6[16];
-//    __u32 daddr_v4;
-//    __u8 daddr_v6[16];
-//
-//	u16 sport;
-//	u16 dport;
-//	u16 af;
-//
-//    u64 ts_ns;
-//
-//	int old_state;
-//	int new_state;
-//};
-//struct tcp_state_event *unused3 __attribute__((unused));
+struct {
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, 1 << 24);
+} tcp_set_state_events SEC(".maps");
 
-//SEC("tracepoint/sock/inet_sock_set_state")
-//int sock_set_state(struct trace_event_raw_inet_sock_set_state *ctx) {
-//    u64 timestamp = bpf_cpu_to_be64(bpf_ktime_get_ns());
-//
-//    if (ctx->protocol != IPPROTO_TCP)
-//        return 0;
-//
-//    struct tcp_state_event *event;
-//    event = bpf_ringbuf_reserve(&tcp_state_events, sizeof(struct tcp_state_event), 0);
-//    if (!event) {
-//        return 0;
-//    }
-//
-//    event->ts_ns = timestamp;
-//
-//    struct sock *sk = (struct sock *)ctx->skaddr;
-//    event->sport = bpf_htons(ctx->sport);
-//    event->dport = bpf_htons(ctx->dport);
-//    event->af = bpf_htons(ctx->family);
-//
-//    event->old_state = bpf_htonl(ctx->oldstate);
-//    event->new_state = bpf_htonl(ctx->newstate);
-//
-//    if (ctx->family == AF_INET) {
-//        bpf_probe_read_kernel(&event->saddr_v4, sizeof(event->saddr_v4), &sk->__sk_common.skc_rcv_saddr);
-//        bpf_probe_read_kernel(&event->daddr_v4, sizeof(event->daddr_v4), &sk->__sk_common.skc_daddr);
-//    } else {
-////        BPF_CORE_READ_INTO(event->saddr_v6, sk, __sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);
-////        BPF_CORE_READ_INTO(event->daddr_v6, sk, __sk_common.skc_v6_daddr.in6_u.u6_addr32);
-//    }
-//
-////    if (family == AF_INET) {
-////        bpf_probe_read_kernel(&event.saddr, sizeof(event.saddr), &sk->__sk_common.skc_rcv_saddr);
-////        bpf_probe_read_kernel(&event.daddr, sizeof(event.daddr), &sk->__sk_common.skc_daddr);
-////    } else { /* family == AF_INET6 */
-////        bpf_probe_read_kernel(&event.saddr, sizeof(event.saddr), &sk->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);
-////        bpf_probe_read_kernel(&event.daddr, sizeof(event.daddr), &sk->__sk_common.skc_v6_daddr.in6_u.u6_addr32);
-////    }
-//
-//	bpf_ringbuf_submit(event, 0);
-//
-//    return 0;
-//}
+struct tcp_set_state_event {
+    u64 timestamp_ns;
+
+	unsigned __int128 source_address;
+	unsigned __int128 destination_address;
+    __u16 source_port;
+    __u16 destination_port;
+    __u16 address_family;
+    __u16 old_state;
+    __u16 new_state;
+};
+struct tcp_set_state_event *unused_tcp_set_state_event __attribute__((unused));
+
+SEC("tracepoint/sock/inet_sock_set_state")
+int trace_inet_sock_set_state(struct trace_event_raw_inet_sock_set_state *ctx) {
+    if (ctx->protocol != IPPROTO_TCP)
+        return 0;
+
+    // Only emit transitions that signal an error condition. The normal close
+    // progression (ESTABLISHED -> FIN_WAIT1 -> FIN_WAIT2 -> CLOSE for active
+    // close, ESTABLISHED -> CLOSE_WAIT -> LAST_ACK -> CLOSE for passive close,
+    // anything -> TIME_WAIT, etc.) is filtered out.
+    //
+    // - SYN_SENT  -> CLOSE: connect() failed (timeout / refused / RST during handshake)
+    // - SYN_RECV  -> CLOSE: server-side handshake aborted
+    // - ESTABLISHED -> CLOSE: abortive close, typically RST received mid-connection
+    if (ctx->newstate != TCP_CLOSE)
+        return 0;
+    if (ctx->oldstate != TCP_SYN_SENT &&
+        ctx->oldstate != TCP_SYN_RECV &&
+        ctx->oldstate != TCP_ESTABLISHED)
+        return 0;
+
+    u64 timestamp_ns = bpf_cpu_to_be64(bpf_ktime_get_boot_ns());
+
+    struct tcp_set_state_event *event;
+    event = bpf_ringbuf_reserve(&tcp_set_state_events, sizeof(struct tcp_set_state_event), 0);
+    if (!event) {
+        return 1;
+    }
+
+    __builtin_memset(event, 0, sizeof(*event));
+
+    event->timestamp_ns = timestamp_ns;
+
+    if (ctx->family == AF_INET) {
+        bpf_probe_read(&event->source_address, sizeof(event->source_address), ctx->saddr);
+        bpf_probe_read(&event->destination_address, sizeof(event->destination_address), ctx->daddr);
+    } else if (ctx->family == AF_INET6) {
+        bpf_probe_read(&event->source_address, sizeof(event->source_address), ctx->saddr_v6);
+        bpf_probe_read(&event->destination_address, sizeof(event->destination_address), ctx->daddr_v6);
+    }
+
+    event->source_port = bpf_htons(ctx->sport);
+    event->destination_port = bpf_htons(ctx->dport);
+    event->address_family = bpf_htons(ctx->family);
+    event->old_state = bpf_htons((__u16)ctx->oldstate);
+    event->new_state = bpf_htons((__u16)ctx->newstate);
+
+    bpf_ringbuf_submit(event, 0);
+
+    return 0;
+}
 
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
@@ -404,6 +467,7 @@ struct tcp_retransmission_event {
     __u16 source_port;
     __u16 destination_port;
     __u16 address_family;
+    __u16 state;
 };
 struct tcp_retransmission_event *unused5 __attribute__((unused));
 
@@ -432,6 +496,7 @@ int tcp_retransmit_skb(struct tcp_retransmit_skb_ctx *ctx) {
     event->source_port = bpf_htons(ctx->sport);
     event->destination_port = bpf_htons(ctx->dport);
     event->address_family = bpf_htons(ctx->family);
+    event->state = bpf_htons((__u16)ctx->state);
 
     bpf_ringbuf_submit(event, 0);
 
@@ -494,6 +559,16 @@ struct {
 	__uint(max_entries, 1 << 24);
 } packet_drop_events SEC(".maps");
 
+// Allowlist of skb_drop_reason values that we want to emit events for.
+// Populated from userspace at startup using kernel BTF, since the numeric
+// enum values are not stable across kernel versions.
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, __u16);
+	__type(value, __u8);
+	__uint(max_entries, 256);
+} packet_drop_reason_filter SEC(".maps");
+
 struct packet_drop_event {
     u64 timestamp_ns;
 
@@ -509,18 +584,18 @@ struct packet_drop_event {
 };
 struct packet_drop_event *unused7 __attribute__((unused));
 
+#define ETH_P_IP   0x0800
+#define ETH_P_IPV6 0x86DD
+
 SEC("tracepoint/skb/kfree_skb")
 int trace_kfree_skb(struct trace_event_raw_kfree_skb *ctx) {
     u64 timestamp_ns = bpf_cpu_to_be64(bpf_ktime_get_boot_ns());
 
     __u16 reason = ctx->reason;
 
-    int reason_not_specified = bpf_core_enum_value(enum skb_drop_reason, SKB_DROP_REASON_NOT_SPECIFIED);
-    if (reason_not_specified == 0)
-        return 1;
-
-    if (reason <= reason_not_specified)
-        return 1;
+    __u8 *keep = bpf_map_lookup_elem(&packet_drop_reason_filter, &reason);
+    if (!keep)
+        return 0;
 
     struct packet_drop_event *event;
     event = bpf_ringbuf_reserve(&packet_drop_events, sizeof(struct packet_drop_event), 0);
@@ -531,29 +606,57 @@ int trace_kfree_skb(struct trace_event_raw_kfree_skb *ctx) {
     __builtin_memset(event, 0, sizeof(*event));
 
     event->timestamp_ns = timestamp_ns;
-    event->reason = bpf_ntohs(reason);
+    event->reason = bpf_htons(reason);
     event->location = (u64)ctx->location;
 
     struct sk_buff *skb;
     bpf_core_read(&skb, sizeof(skb), &ctx->skbaddr);
+    if (!skb) {
+        bpf_ringbuf_submit(event, 0);
+        return 0;
+    }
 
-	struct sock *sk = BPF_CORE_READ(skb, sk);
+    unsigned char *head = BPF_CORE_READ(skb, head);
+    __u16 network_header = BPF_CORE_READ(skb, network_header);
+    __u16 transport_header = BPF_CORE_READ(skb, transport_header);
+    __u16 eth_protocol = bpf_ntohs(ctx->protocol);
 
-    if (sk) {
-        event->address_family = bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_family));
+    __u8 transport_protocol = 0;
 
-        if (event->address_family == AF_INET) {
-            event->source_address = BPF_CORE_READ(sk, __sk_common.skc_rcv_saddr);
-            event->destination_address = BPF_CORE_READ(sk, __sk_common.skc_daddr);
-        } else if (event->address_family == AF_INET6) {
-            BPF_CORE_READ_INTO(&event->source_address, sk, __sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);
-            BPF_CORE_READ_INTO(&event->destination_address, sk, __sk_common.skc_v6_daddr.in6_u.u6_addr32);
+    if (eth_protocol == ETH_P_IP) {
+        event->address_family = bpf_htons(AF_INET);
+        struct iphdr iph;
+        if (bpf_probe_read_kernel(&iph, sizeof(iph), head + network_header) == 0) {
+            __builtin_memcpy(&event->source_address, &iph.saddr, sizeof(iph.saddr));
+            __builtin_memcpy(&event->destination_address, &iph.daddr, sizeof(iph.daddr));
+            transport_protocol = iph.protocol;
         }
+    } else if (eth_protocol == ETH_P_IPV6) {
+        event->address_family = bpf_htons(AF_INET6);
+        struct ipv6hdr ip6h;
+        if (bpf_probe_read_kernel(&ip6h, sizeof(ip6h), head + network_header) == 0) {
+            __builtin_memcpy(&event->source_address, &ip6h.saddr, sizeof(ip6h.saddr));
+            __builtin_memcpy(&event->destination_address, &ip6h.daddr, sizeof(ip6h.daddr));
+            transport_protocol = ip6h.nexthdr;
+        }
+    }
 
-        event->source_port = bpf_htons(BPF_CORE_READ(sk, __sk_common.skc_num));
-        event->destination_port = BPF_CORE_READ(sk, __sk_common.skc_dport);
+    event->transport_protocol = transport_protocol;
 
-        event->transport_protocol = BPF_CORE_READ(sk, sk_protocol);
+    if (transport_header != (__u16)~0U) {
+        if (transport_protocol == IPPROTO_TCP) {
+            struct tcphdr tcph;
+            if (bpf_probe_read_kernel(&tcph, sizeof(tcph), head + transport_header) == 0) {
+                event->source_port = tcph.source;
+                event->destination_port = tcph.dest;
+            }
+        } else if (transport_protocol == IPPROTO_UDP) {
+            struct udphdr udph;
+            if (bpf_probe_read_kernel(&udph, sizeof(udph), head + transport_header) == 0) {
+                event->source_port = udph.source;
+                event->destination_port = udph.dest;
+            }
+        }
     }
 
     bpf_ringbuf_submit(event, 0);

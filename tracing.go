@@ -21,7 +21,10 @@ import (
 	"github.com/vphpersson/tracing_service/pkg/tracing_service"
 	connectTracing "github.com/vphpersson/tracing_service/pkg/tracing_service/connect"
 	destroyConnectionTracing "github.com/vphpersson/tracing_service/pkg/tracing_service/destroy_connection"
+	execveTracing "github.com/vphpersson/tracing_service/pkg/tracing_service/execve"
+	freePacketTracing "github.com/vphpersson/tracing_service/pkg/tracing_service/free_packet"
 	tcpRetransmissionTracing "github.com/vphpersson/tracing_service/pkg/tracing_service/tcp_retransmission"
+	tcpSetStateTracing "github.com/vphpersson/tracing_service/pkg/tracing_service/tcp_set_state"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -92,26 +95,32 @@ func main() {
 			objs.BpfPrograms.TcpRetransmitSkb,
 			objs.BpfMaps.TcpRetransmissionEvents,
 		),
+		tcpSetStateTracing.Run(
+			errGroupCtx,
+			objs.BpfPrograms.TraceInetSockSetState,
+			objs.BpfMaps.TcpSetStateEvents,
+		),
 		connectTracing.Run(
 			errGroupCtx,
 			objs.BpfPrograms.TcpConnect,
 			objs.BpfMaps.ConnectEvents,
 		),
 		//openTracing.Run(
-		//	ctx,
+		//	errGroupCtx,
 		//	objs.BpfPrograms.TraceOpenat,
 		//	objs.BpfMaps.FileOpenEvents,
 		//),
-		//freePacketTracing.Run(
-		//	ctx,
-		//	objs.BpfPrograms.TraceKfreeSkb,
-		//	objs.BpfMaps.PacketDropEvents,
-		//),
-		//execveTracing.Run(
-		//	ctx,
-		//	objs.BpfPrograms.EnterExecve,
-		//	objs.BpfMaps.ExecveEvents,
-		//),
+		freePacketTracing.Run(
+			errGroupCtx,
+			objs.BpfPrograms.TraceKfreeSkb,
+			objs.BpfMaps.PacketDropEvents,
+			objs.BpfMaps.PacketDropReasonFilter,
+		),
+		execveTracing.Run(
+			errGroupCtx,
+			objs.BpfPrograms.EnterExecve,
+			objs.BpfMaps.ExecveEvents,
+		),
 	}
 
 	var printMutex sync.Mutex

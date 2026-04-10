@@ -10,8 +10,26 @@ import (
 	"github.com/vphpersson/tracing/pkg/tracing"
 	"github.com/vphpersson/tracing_service/pkg/tracing_service"
 	"iter"
+	"net"
+	"strconv"
 	"sync"
+	"syscall"
 )
+
+var tcpStateNames = map[uint16]string{
+	1:  "ESTABLISHED",
+	2:  "SYN_SENT",
+	3:  "SYN_RECV",
+	4:  "FIN_WAIT1",
+	5:  "FIN_WAIT2",
+	6:  "TIME_WAIT",
+	7:  "CLOSE",
+	8:  "CLOSE_WAIT",
+	9:  "LAST_ACK",
+	10: "LISTEN",
+	11: "CLOSING",
+	12: "NEW_SYN_RECV",
+}
 
 func EnrichWithTcpRetransmissionEvent(base *ecs.Base, event *tracing_service.BpfTcpRetransmissionEvent) {
 	if base == nil {
@@ -34,7 +52,41 @@ func EnrichWithTcpRetransmissionEvent(base *ecs.Base, event *tracing_service.Bpf
 		6,
 	)
 
-	base.Message = ecs.MakeConnectionMessage(base, "")
+	var stateSuffix string
+	if stateName, ok := tcpStateNames[event.State]; ok {
+		stateSuffix = stateName
+		ecsTcp := base.Tcp
+		if ecsTcp == nil {
+			ecsTcp = &ecs.Tcp{}
+			base.Tcp = ecsTcp
+		}
+		ecsTcp.State = stateName
+	}
+
+	if event.AddressFamily == uint16(syscall.AF_INET6) {
+		if tracing_service.IsIPv4MappedIPv6(event.SourceAddress) || tracing_service.IsIPv4MappedIPv6(event.DestinationAddress) {
+			if base.Network == nil {
+				base.Network = &ecs.Network{}
+			}
+			base.Network.Type = "ipv4"
+		}
+	}
+
+	if communityId := ecs.CommunityIdFromTargets(base.Source, base.Destination, 6); communityId != "" {
+		if base.Network == nil {
+			base.Network = &ecs.Network{}
+		}
+		base.Network.CommunityId = append(base.Network.CommunityId, communityId)
+	}
+
+	var srcAddr, dstAddr string
+	if s := base.Source; s != nil {
+		srcAddr = net.JoinHostPort(s.Ip, strconv.Itoa(s.Port))
+	}
+	if d := base.Destination; d != nil {
+		dstAddr = net.JoinHostPort(d.Ip, strconv.Itoa(d.Port))
+	}
+	base.Message = fmt.Sprintf("tcp_retransmission: %s -> %s %s", srcAddr, dstAddr, stateSuffix)
 }
 
 func EnrichWithTcpRetransmissionSynAckEvent(base *ecs.Base, event *tracing_service.BpfTcpRetransmissionSynackEvent) {
@@ -58,7 +110,30 @@ func EnrichWithTcpRetransmissionSynAckEvent(base *ecs.Base, event *tracing_servi
 		6,
 	)
 
-	base.Message = ecs.MakeConnectionMessage(base, "")
+	if event.AddressFamily == uint16(syscall.AF_INET6) {
+		if tracing_service.IsIPv4MappedIPv6(event.SourceAddress) || tracing_service.IsIPv4MappedIPv6(event.DestinationAddress) {
+			if base.Network == nil {
+				base.Network = &ecs.Network{}
+			}
+			base.Network.Type = "ipv4"
+		}
+	}
+
+	if communityId := ecs.CommunityIdFromTargets(base.Source, base.Destination, 6); communityId != "" {
+		if base.Network == nil {
+			base.Network = &ecs.Network{}
+		}
+		base.Network.CommunityId = append(base.Network.CommunityId, communityId)
+	}
+
+	var srcAddr, dstAddr string
+	if s := base.Source; s != nil {
+		srcAddr = net.JoinHostPort(s.Ip, strconv.Itoa(s.Port))
+	}
+	if d := base.Destination; d != nil {
+		dstAddr = net.JoinHostPort(d.Ip, strconv.Itoa(d.Port))
+	}
+	base.Message = fmt.Sprintf("tcp_retransmission_synack: %s -> %s", srcAddr, dstAddr)
 }
 
 func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq2[*ecs.Base, error] {

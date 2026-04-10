@@ -52,6 +52,11 @@ func EnrichWithExecveEvent(base *ecs.Base, event *tracing_service.BpfExecveEvent
 		base.Process = ecsProcess
 	}
 
+	// process.title from bpf_get_current_comm is the pre-exec comm, which
+	// is the parent's title, not the new process's.
+	parentTitle := ecsProcess.Title
+	ecsProcess.Title = ""
+
 	ecsProcess.Args = argvStrings
 	ecsProcess.ArgsCount = len(argvStrings)
 	ecsProcess.CommandLine = motmedelStrings.ShellJoin(argvStrings)
@@ -64,9 +69,37 @@ func EnrichWithExecveEvent(base *ecs.Base, event *tracing_service.BpfExecveEvent
 		ecsProcess.Parent = ecsProcessParent
 	}
 
-	ecsProcessParent.Title = ecsProcess.Title
+	ecsProcessParent.Title = parentTitle
 
-	base.Message = fmt.Sprintf("%s ran %q", ecsProcessParent.Title, ecsProcess.CommandLine)
+	parentExeName := string(bytes.TrimRight(event.ParentExecutableName[:], "\x00"))
+	if parentExeName != "" {
+		ecsProcessParent.Name = parentExeName
+	}
+
+	parentCmdlineRaw := bytes.TrimRight(event.ParentCommandLine[:], "\x00")
+	if len(parentCmdlineRaw) > 0 {
+		parentCommandLine := string(bytes.ReplaceAll(parentCmdlineRaw, []byte{0}, []byte{' '}))
+		ecsProcessParent.CommandLine = parentCommandLine
+
+		if ecsProcessParent.Executable == "" {
+			if idx := bytes.IndexByte(parentCmdlineRaw, 0); idx > 0 {
+				ecsProcessParent.Executable = string(parentCmdlineRaw[:idx])
+			} else {
+				ecsProcessParent.Executable = string(parentCmdlineRaw)
+			}
+			ecsProcessParent.Name = filepath.Base(ecsProcessParent.Executable)
+		}
+	}
+
+	parentExe := ecsProcessParent.Executable
+	if parentExe == "" {
+		parentExe = ecsProcessParent.Name
+	}
+	if parentExe == "" {
+		parentExe = ecsProcessParent.Title
+	}
+
+	base.Message = fmt.Sprintf("execve: %s -> %s", parentExe, ecsProcess.Executable)
 }
 
 func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq2[*ecs.Base, error] {

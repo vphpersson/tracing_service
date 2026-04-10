@@ -10,7 +10,11 @@ import (
 	"github.com/vphpersson/tracing/pkg/tracing"
 	"github.com/vphpersson/tracing_service/pkg/tracing_service"
 	"iter"
+	"net"
+	"strconv"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -136,7 +140,43 @@ func EnrichWithDestroyConnectionEvent(base *ecs.Base, event *tracing_service.Bpf
 		ecsTcp.State = tcpStateName
 	}
 
-	base.Message = ecs.MakeConnectionMessage(base, tcpStateName)
+	if event.ConntrackStatusMask != 0 {
+		statusNames := translateStatusBits(int(event.ConntrackStatusMask))
+		if len(statusNames) > 0 {
+			if base.Labels == nil {
+				base.Labels = make(map[string]string)
+			}
+			base.Labels["conntrack_status"] = strings.Join(statusNames, ",")
+		}
+	}
+
+	if event.AddressFamily == uint16(syscall.AF_INET6) {
+		if tracing_service.IsIPv4MappedIPv6(event.SourceAddress) || tracing_service.IsIPv4MappedIPv6(event.DestinationAddress) {
+			if base.Network == nil {
+				base.Network = &ecs.Network{}
+			}
+			base.Network.Type = "ipv4"
+		}
+	}
+
+	if communityId := ecs.CommunityIdFromTargets(base.Source, base.Destination, int(event.TransportProtocol)); communityId != "" {
+		if base.Network == nil {
+			base.Network = &ecs.Network{}
+		}
+		base.Network.CommunityId = append(base.Network.CommunityId, communityId)
+	}
+
+	var srcAddr, dstAddr, transport string
+	if s := base.Source; s != nil {
+		srcAddr = net.JoinHostPort(s.Ip, strconv.Itoa(s.Port))
+	}
+	if d := base.Destination; d != nil {
+		dstAddr = net.JoinHostPort(d.Ip, strconv.Itoa(d.Port))
+	}
+	if n := base.Network; n != nil {
+		transport = n.Transport
+	}
+	base.Message = fmt.Sprintf("destroy_connection: %s -> %s %s", srcAddr, dstAddr, transport)
 }
 
 func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq2[*ecs.Base, error] {
