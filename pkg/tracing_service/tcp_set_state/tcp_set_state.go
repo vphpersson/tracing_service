@@ -141,7 +141,7 @@ func Run(ctx context.Context, program *ebpf.Program, ebpfMap *ebpf.Map) iter.Seq
 					Event: &schema.Event{
 						Kind:     "event",
 						Category: []string{"network"},
-						Type:     []string{"connection", "info"},
+						Type:     []string{"connection", "info", "error"},
 						Action:   "tcp_set_state",
 						Module:   "tracing",
 						Reason:   "A TCP socket changed state.",

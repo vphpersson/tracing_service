@@ -11,6 +11,15 @@ struct nf_conn_tstamp {
 	uint64_t stop;
 };
 
+struct nf_conn_counter {
+	s64 packets;
+	s64 bytes;
+};
+
+struct nf_conn_acct {
+	struct nf_conn_counter counter[2];
+};
+
 #define TASK_COMM_LEN 16
 #define AF_INET 2
 #define AF_INET6 10
@@ -365,6 +374,11 @@ struct destroy_connection_event {
     u64 stop;
     u8 tcp_state;
     u8 tcp_last_direction;
+
+    u64 source_packets;
+    u64 source_bytes;
+    u64 destination_packets;
+    u64 destination_bytes;
 };
 struct destroy_connection_event *unused4 __attribute__((unused));
 
@@ -373,19 +387,6 @@ int BPF_PROG(nf_ct_helper_destroy, struct nf_conn *ct) {
     u64 timestamp_ns = bpf_ktime_get_boot_ns();
 
     struct nf_conntrack_tuple *tuple = &ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple;
-
-    if (tuple->dst.protonum == 6) {
-        struct ip_ct_tcp *tcp = &ct->proto.tcp;
-        if (tcp->state == TCP_CONNTRACK_CLOSE || tcp->state == TCP_CONNTRACK_TIME_WAIT) {
-            return 0;
-        }
-    } else if (tuple->dst.protonum == 17) {
-        if (ct->status & (1 << IPS_SEEN_REPLY_BIT)) {
-            return 0;
-        }
-    } else {
-        return 0;
-    }
 
     struct destroy_connection_event *event;
     event = bpf_ringbuf_reserve(&destroy_connection_events, sizeof(struct destroy_connection_event), 0);
@@ -432,6 +433,16 @@ int BPF_PROG(nf_ct_helper_destroy, struct nf_conn *ct) {
 
     event->start = ct_ts.start;
     event->stop = ct_ts.stop;
+
+    if (ext.offset[NF_CT_EXT_ACCT]) {
+        struct nf_conn_acct ct_acct;
+        bpf_probe_read_kernel(&ct_acct, sizeof(ct_acct), (void*) ct->ext + ext.offset[NF_CT_EXT_ACCT]);
+
+        event->source_packets = ct_acct.counter[0].packets;
+        event->source_bytes = ct_acct.counter[0].bytes;
+        event->destination_packets = ct_acct.counter[1].packets;
+        event->destination_bytes = ct_acct.counter[1].bytes;
+    }
 
     bpf_ringbuf_submit(event, 0);
 

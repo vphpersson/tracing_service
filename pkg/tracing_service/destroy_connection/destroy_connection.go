@@ -167,6 +167,45 @@ func EnrichWithDestroyConnectionEvent(base *schema.Base, event *tracing_service.
 		base.Network.CommunityId = append(base.Network.CommunityId, communityId)
 	}
 
+	if event.SourceBytes != 0 || event.SourcePackets != 0 || event.DestinationBytes != 0 || event.DestinationPackets != 0 {
+		if base.Source != nil {
+			base.Source.Bytes = int(event.SourceBytes)
+			base.Source.Packets = int(event.SourcePackets)
+		}
+		if base.Destination != nil {
+			base.Destination.Bytes = int(event.DestinationBytes)
+			base.Destination.Packets = int(event.DestinationPackets)
+		}
+		if base.Network == nil {
+			base.Network = &schema.Network{}
+		}
+		base.Network.Bytes = int64(event.SourceBytes) + int64(event.DestinationBytes)
+		base.Network.Packets = int64(event.SourcePackets) + int64(event.DestinationPackets)
+	}
+
+	var isError bool
+	var errorMessage string
+	if event.TransportProtocol == 6 {
+		if event.TcpState != 8 && event.TcpState != 7 {
+			isError = true
+			stateName := tcpStateIdToName[event.TcpState]
+			errorMessage = fmt.Sprintf("TCP connection destroyed in unexpected conntrack state: %s.", stateName)
+		}
+	} else if event.TransportProtocol == 17 {
+		if event.ConntrackStatusMask&IPS_SEEN_REPLY_BIT == 0 {
+			isError = true
+			errorMessage = "UDP connection destroyed without a reply being observed."
+		}
+	}
+
+	if isError {
+		ecsEvent := base.Event
+		if ecsEvent != nil {
+			ecsEvent.Type = append(ecsEvent.Type, "error")
+		}
+		base.Error = &schema.Error{Message: errorMessage}
+	}
+
 	var srcAddr, dstAddr, transport string
 	if s := base.Source; s != nil {
 		srcAddr = net.JoinHostPort(s.Ip, strconv.Itoa(s.Port))

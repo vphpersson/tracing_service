@@ -3,7 +3,7 @@ module github.com/vphpersson/tracing_service
 go 1.26
 
 require (
-	github.com/Motmedel/utils_go v0.0.461
+	github.com/Motmedel/utils_go v0.0.463
 	github.com/cilium/ebpf v0.21.0
 	github.com/vphpersson/tracing v0.0.5
 	golang.org/x/sync v0.20.0
