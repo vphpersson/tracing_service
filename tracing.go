@@ -19,9 +19,13 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/vphpersson/tracing_service/pkg/tracing_service"
 	connectTracing "github.com/vphpersson/tracing_service/pkg/tracing_service/connect"
+	connectLatencyTracing "github.com/vphpersson/tracing_service/pkg/tracing_service/connect_latency"
 	destroyConnectionTracing "github.com/vphpersson/tracing_service/pkg/tracing_service/destroy_connection"
 	execveTracing "github.com/vphpersson/tracing_service/pkg/tracing_service/execve"
 	freePacketTracing "github.com/vphpersson/tracing_service/pkg/tracing_service/free_packet"
+	tcpErrorTracing "github.com/vphpersson/tracing_service/pkg/tracing_service/tcp_error"
+	tcpIcmpErrorTracing "github.com/vphpersson/tracing_service/pkg/tracing_service/tcp_icmp_error"
+	tcpResetTracing "github.com/vphpersson/tracing_service/pkg/tracing_service/tcp_reset"
 	tcpRetransmissionTracing "github.com/vphpersson/tracing_service/pkg/tracing_service/tcp_retransmission"
 	tcpSetStateTracing "github.com/vphpersson/tracing_service/pkg/tracing_service/tcp_set_state"
 	"golang.org/x/sync/errgroup"
@@ -113,10 +117,31 @@ func main() {
 			objs.BpfPrograms.TraceInetSockSetState,
 			objs.BpfMaps.TcpSetStateEvents,
 		),
+		tcpErrorTracing.Run(
+			errGroupCtx,
+			objs.BpfPrograms.TcpDoneWithError,
+			objs.BpfMaps.TcpErrorEvents,
+		),
+		tcpResetTracing.Run(
+			errGroupCtx,
+			objs.BpfPrograms.TcpReset,
+			objs.BpfMaps.TcpResetEvents,
+		),
+		tcpIcmpErrorTracing.Run(
+			errGroupCtx,
+			objs.BpfPrograms.TcpV4Err,
+			objs.BpfPrograms.TcpV6Err,
+			objs.BpfMaps.TcpIcmpErrorEvents,
+		),
 		connectTracing.Run(
 			errGroupCtx,
 			objs.BpfPrograms.TcpConnect,
 			objs.BpfMaps.ConnectEvents,
+		),
+		connectLatencyTracing.Run(
+			errGroupCtx,
+			objs.BpfPrograms.TcpFinishConnect,
+			objs.BpfMaps.ConnectLatencyEvents,
 		),
 		//openTracing.Run(
 		//	errGroupCtx,

@@ -178,6 +178,26 @@ struct {
 	__uint(max_entries, 1 << 24);
 } connect_events SEC(".maps");
 
+// Per-socket connect start info, populated in tcp_connect and consumed in
+// tcp_rcv_state_process to compute three-way-handshake latency. Keyed by the
+// address of the struct sock (cast to u64). LRU so stale entries from failed
+// connects are automatically evicted.
+struct connect_start_info {
+    u64 timestamp_ns;
+    u32 user_id;
+    u32 group_id;
+    u32 process_id;
+    u32 parent_process_id;
+    u8 process_title[TASK_COMM_LEN];
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __type(key, u64);
+    __type(value, struct connect_start_info);
+    __uint(max_entries, 10240);
+} connect_start_infos SEC(".maps");
+
 struct connect_event {
     u64 timestamp_ns;
 
@@ -277,8 +297,340 @@ int BPF_PROG(tcp_connect, struct sock *sk) {
     event->address_family = sk->__sk_common.skc_family;
     bpf_probe_read_kernel(&event->transport_protocol, sizeof(event->transport_protocol), &sk->sk_protocol);
 
-	bpf_ringbuf_submit(event, 0);
+    // Record connect-start info for latency measurement at tcp_rcv_state_process.
+    // Only track TCP sockets; tcp_rcv_state_process is TCP-only but this avoids
+    // polluting the map with UDP/other sockets that also traverse tcp_connect
+    // would not (tcp_connect itself is TCP-only, so this is effectively a no-op
+    // guard but kept for clarity).
+    u64 sk_key = (u64)sk;
+    struct connect_start_info start_info = {};
+    start_info.timestamp_ns = timestamp_ns;
+    start_info.user_id = event->user_id;
+    start_info.group_id = event->group_id;
+    start_info.process_id = event->process_id;
+    start_info.parent_process_id = event->parent_process_id;
+    __builtin_memcpy(&start_info.process_title, &event->process_title, TASK_COMM_LEN);
+    bpf_map_update_elem(&connect_start_infos, &sk_key, &start_info, BPF_ANY);
 
+    bpf_ringbuf_submit(event, 0);
+
+    return 0;
+}
+
+// TCP connect latency
+//
+// tcp_finish_connect runs from tcp_rcv_synsent_state_process after a valid
+// SYN-ACK has been accepted, immediately before the socket is promoted to
+// TCP_ESTABLISHED. It only runs on successful handshake completion: SYN
+// timeouts never reach it (timer path), nor do refused connects (RST handling
+// bypasses tcp_finish_connect). Failed connects still show up separately via
+// the SYN_SENT -> CLOSE transition in the inet_sock_set_state handler above.
+// The LRU hash evicts stale start-info entries for any connect that doesn't
+// finish.
+
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 1 << 24);
+} connect_latency_events SEC(".maps");
+
+struct connect_latency_event {
+    u64 timestamp_ns;
+    u64 duration_ns;
+
+    u32 user_id;
+    u32 group_id;
+
+    u32 process_id;
+    u32 parent_process_id;
+    u8 process_title[TASK_COMM_LEN];
+
+    unsigned __int128 source_address;
+    unsigned __int128 destination_address;
+    __u16 source_port;
+    __u16 destination_port;
+    __u16 address_family;
+};
+struct connect_latency_event *unused_connect_latency_event __attribute__((unused));
+
+SEC("fentry/tcp_finish_connect")
+int BPF_PROG(tcp_finish_connect, struct sock *sk) {
+    if (!sk)
+        return 0;
+
+    u64 sk_key = (u64)sk;
+    struct connect_start_info *info = bpf_map_lookup_elem(&connect_start_infos, &sk_key);
+    if (!info)
+        return 0;
+
+    u64 now = bpf_ktime_get_boot_ns();
+
+    struct connect_latency_event *event;
+    event = bpf_ringbuf_reserve(&connect_latency_events, sizeof(*event), 0);
+    if (!event) {
+        bpf_map_delete_elem(&connect_start_infos, &sk_key);
+        return 0;
+    }
+
+    __builtin_memset(event, 0, sizeof(*event));
+
+    event->timestamp_ns = now;
+    event->duration_ns = now - info->timestamp_ns;
+    event->user_id = info->user_id;
+    event->group_id = info->group_id;
+    event->process_id = info->process_id;
+    event->parent_process_id = info->parent_process_id;
+    __builtin_memcpy(&event->process_title, &info->process_title, TASK_COMM_LEN);
+
+    u16 family = BPF_CORE_READ(sk, __sk_common.skc_family);
+    event->address_family = family;
+
+    if (family == AF_INET) {
+        bpf_probe_read_kernel(&event->source_address, sizeof(event->source_address), &sk->__sk_common.skc_rcv_saddr);
+        bpf_probe_read_kernel(&event->destination_address, sizeof(event->destination_address), &sk->__sk_common.skc_daddr);
+    } else if (family == AF_INET6) {
+        bpf_probe_read_kernel(&event->source_address, sizeof(event->source_address), &sk->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);
+        bpf_probe_read_kernel(&event->destination_address, sizeof(event->destination_address), &sk->__sk_common.skc_v6_daddr.in6_u.u6_addr32);
+    }
+
+    event->source_port = BPF_CORE_READ(sk, __sk_common.skc_num);
+    event->destination_port = bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
+
+    bpf_ringbuf_submit(event, 0);
+    bpf_map_delete_elem(&connect_start_infos, &sk_key);
+
+    return 0;
+}
+
+// TCP error: connection terminated with an error (timeout / tcp_abort / ...).
+//
+// tcp_done_with_error is the kernel helper (introduced mid-6.x, replacing the
+// older static tcp_write_err) that is called from every TCP error-termination
+// path: retransmission timeout, user-triggered abort, etc. It sets sk->sk_err
+// and calls tcp_done. err is typically ETIMEDOUT for RTO expiry and
+// EPIPE/ECONNRESET for others. Fires in softirq or process context depending
+// on the path, so process-context helpers can't be trusted.
+
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 1 << 24);
+} tcp_error_events SEC(".maps");
+
+struct tcp_error_event {
+    u64 timestamp_ns;
+
+    unsigned __int128 source_address;
+    unsigned __int128 destination_address;
+    __u16 source_port;
+    __u16 destination_port;
+    __u16 address_family;
+    __u16 state;
+    __s32 err;
+};
+struct tcp_error_event *unused_tcp_error_event __attribute__((unused));
+
+SEC("fentry/tcp_done_with_error")
+int BPF_PROG(tcp_done_with_error, struct sock *sk, int err) {
+    if (!sk)
+        return 0;
+
+    struct tcp_error_event *event;
+    event = bpf_ringbuf_reserve(&tcp_error_events, sizeof(*event), 0);
+    if (!event)
+        return 0;
+
+    __builtin_memset(event, 0, sizeof(*event));
+
+    event->timestamp_ns = bpf_ktime_get_boot_ns();
+    event->err = err;
+
+    u16 family = BPF_CORE_READ(sk, __sk_common.skc_family);
+    event->address_family = family;
+    event->state = BPF_CORE_READ(sk, __sk_common.skc_state);
+
+    if (family == AF_INET) {
+        bpf_probe_read_kernel(&event->source_address, sizeof(event->source_address), &sk->__sk_common.skc_rcv_saddr);
+        bpf_probe_read_kernel(&event->destination_address, sizeof(event->destination_address), &sk->__sk_common.skc_daddr);
+    } else if (family == AF_INET6) {
+        bpf_probe_read_kernel(&event->source_address, sizeof(event->source_address), &sk->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);
+        bpf_probe_read_kernel(&event->destination_address, sizeof(event->destination_address), &sk->__sk_common.skc_v6_daddr.in6_u.u6_addr32);
+    }
+
+    event->source_port = BPF_CORE_READ(sk, __sk_common.skc_num);
+    event->destination_port = bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
+
+    bpf_ringbuf_submit(event, 0);
+    return 0;
+}
+
+// TCP RST received. tcp_reset runs when a RST is delivered to an existing
+// socket. sk_err is set to ECONNRESET or ECONNREFUSED depending on state
+// (ECONNREFUSED during handshake, ECONNRESET afterwards). We capture state at
+// fentry so the caller can tell which of those happened.
+
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 1 << 24);
+} tcp_reset_events SEC(".maps");
+
+struct tcp_reset_event {
+    u64 timestamp_ns;
+
+    unsigned __int128 source_address;
+    unsigned __int128 destination_address;
+    __u16 source_port;
+    __u16 destination_port;
+    __u16 address_family;
+    __u16 state;
+};
+struct tcp_reset_event *unused_tcp_reset_event __attribute__((unused));
+
+SEC("fentry/tcp_reset")
+int BPF_PROG(tcp_reset, struct sock *sk, struct sk_buff *skb) {
+    if (!sk)
+        return 0;
+
+    struct tcp_reset_event *event;
+    event = bpf_ringbuf_reserve(&tcp_reset_events, sizeof(*event), 0);
+    if (!event)
+        return 0;
+
+    __builtin_memset(event, 0, sizeof(*event));
+
+    event->timestamp_ns = bpf_ktime_get_boot_ns();
+
+    u16 family = BPF_CORE_READ(sk, __sk_common.skc_family);
+    event->address_family = family;
+    event->state = BPF_CORE_READ(sk, __sk_common.skc_state);
+
+    if (family == AF_INET) {
+        bpf_probe_read_kernel(&event->source_address, sizeof(event->source_address), &sk->__sk_common.skc_rcv_saddr);
+        bpf_probe_read_kernel(&event->destination_address, sizeof(event->destination_address), &sk->__sk_common.skc_daddr);
+    } else if (family == AF_INET6) {
+        bpf_probe_read_kernel(&event->source_address, sizeof(event->source_address), &sk->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);
+        bpf_probe_read_kernel(&event->destination_address, sizeof(event->destination_address), &sk->__sk_common.skc_v6_daddr.in6_u.u6_addr32);
+    }
+
+    event->source_port = BPF_CORE_READ(sk, __sk_common.skc_num);
+    event->destination_port = bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
+
+    bpf_ringbuf_submit(event, 0);
+    return 0;
+}
+
+// ICMP errors delivered to TCP. tcp_v{4,6}_err are the entry points used by
+// the ICMP layer to notify TCP of destination/host/port unreachable, fragmentation
+// needed, etc. The skb passed in is the ICMP packet with skb->data already
+// advanced to the encapsulated (inner) IP header of the packet that triggered
+// the ICMP. We parse that inner packet to extract the 5-tuple of the affected
+// flow. The socket hasn't been looked up yet at fentry, which is fine — we
+// care about which flow errored, not which struct sock holds it.
+
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 1 << 24);
+} tcp_icmp_error_events SEC(".maps");
+
+struct tcp_icmp_error_event {
+    u64 timestamp_ns;
+
+    unsigned __int128 source_address;
+    unsigned __int128 destination_address;
+    __u16 source_port;
+    __u16 destination_port;
+    __u16 address_family;
+    __u8 icmp_type;
+    __u8 icmp_code;
+    __u32 info;
+};
+struct tcp_icmp_error_event *unused_tcp_icmp_error_event __attribute__((unused));
+
+SEC("fentry/tcp_v4_err")
+int BPF_PROG(tcp_v4_err, struct sk_buff *skb, u32 info) {
+    if (!skb)
+        return 0;
+
+    struct tcp_icmp_error_event *event;
+    event = bpf_ringbuf_reserve(&tcp_icmp_error_events, sizeof(*event), 0);
+    if (!event)
+        return 0;
+
+    __builtin_memset(event, 0, sizeof(*event));
+
+    event->timestamp_ns = bpf_ktime_get_boot_ns();
+    event->address_family = AF_INET;
+    event->info = info;
+
+    unsigned char *data = BPF_CORE_READ(skb, data);
+
+    // Inner IPv4 header at skb->data (the packet that triggered the ICMP).
+    struct iphdr iph;
+    if (data && bpf_probe_read_kernel(&iph, sizeof(iph), data) == 0) {
+        __builtin_memcpy(&event->source_address, &iph.saddr, sizeof(iph.saddr));
+        __builtin_memcpy(&event->destination_address, &iph.daddr, sizeof(iph.daddr));
+
+        u32 ihl = (u32)iph.ihl * 4;
+        if (ihl >= sizeof(struct iphdr) && ihl <= 60) {
+            struct tcphdr tcph;
+            if (bpf_probe_read_kernel(&tcph, sizeof(tcph), data + ihl) == 0) {
+                event->source_port = bpf_ntohs(tcph.source);
+                event->destination_port = bpf_ntohs(tcph.dest);
+            }
+        }
+    }
+
+    // Outer ICMP header remains accessible via skb->head + skb->transport_header.
+    unsigned char *head = BPF_CORE_READ(skb, head);
+    __u16 transport_header = BPF_CORE_READ(skb, transport_header);
+    if (head && transport_header != (__u16)~0U) {
+        struct icmphdr icmph;
+        if (bpf_probe_read_kernel(&icmph, sizeof(icmph), head + transport_header) == 0) {
+            event->icmp_type = icmph.type;
+            event->icmp_code = icmph.code;
+        }
+    }
+
+    bpf_ringbuf_submit(event, 0);
+    return 0;
+}
+
+SEC("fentry/tcp_v6_err")
+int BPF_PROG(tcp_v6_err, struct sk_buff *skb, void *opt, u8 type, u8 code, int offset, __be32 info) {
+    if (!skb)
+        return 0;
+
+    struct tcp_icmp_error_event *event;
+    event = bpf_ringbuf_reserve(&tcp_icmp_error_events, sizeof(*event), 0);
+    if (!event)
+        return 0;
+
+    __builtin_memset(event, 0, sizeof(*event));
+
+    event->timestamp_ns = bpf_ktime_get_boot_ns();
+    event->address_family = AF_INET6;
+    event->icmp_type = type;
+    event->icmp_code = code;
+    event->info = bpf_ntohl(info);
+
+    unsigned char *data = BPF_CORE_READ(skb, data);
+
+    struct ipv6hdr ip6h;
+    if (data && bpf_probe_read_kernel(&ip6h, sizeof(ip6h), data) == 0) {
+        __builtin_memcpy(&event->source_address, &ip6h.saddr, sizeof(ip6h.saddr));
+        __builtin_memcpy(&event->destination_address, &ip6h.daddr, sizeof(ip6h.daddr));
+    }
+
+    // offset is the kernel-computed distance from skb->data to the inner TCP
+    // header (past any IPv6 extension headers). Clamp to a sane range so the
+    // verifier can prove the read.
+    if (data && offset >= (int)sizeof(struct ipv6hdr) && offset < 256) {
+        struct tcphdr tcph;
+        if (bpf_probe_read_kernel(&tcph, sizeof(tcph), data + offset) == 0) {
+            event->source_port = bpf_ntohs(tcph.source);
+            event->destination_port = bpf_ntohs(tcph.dest);
+        }
+    }
+
+    bpf_ringbuf_submit(event, 0);
     return 0;
 }
 

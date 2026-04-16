@@ -20,7 +20,7 @@ BPF_SOURCE := tracing.bpf.c
 all: bpf build
 
 bpf:
-	GOPACKAGE=$(GOPACKAGE) go run github.com/cilium/ebpf/cmd/bpf2go -output-dir ${OUTPUT_DIR} -output-stem "${OUTPUT_STEM}" -type execve_event -type connect_event -type destroy_connection_event -type tcp_retransmission_event -type tcp_retransmission_synack_event -type tcp_set_state_event -type packet_drop_event -type file_open_event -target "${TARGET}" bpf "${BPF_SOURCE}" -- $(BPF_INCLUDES)
+	GOPACKAGE=$(GOPACKAGE) go run github.com/cilium/ebpf/cmd/bpf2go -output-dir ${OUTPUT_DIR} -output-stem "${OUTPUT_STEM}" -type execve_event -type connect_event -type connect_latency_event -type destroy_connection_event -type tcp_retransmission_event -type tcp_retransmission_synack_event -type tcp_set_state_event -type tcp_error_event -type tcp_reset_event -type tcp_icmp_error_event -type packet_drop_event -type file_open_event -target "${TARGET}" bpf "${BPF_SOURCE}" -- $(BPF_INCLUDES)
 	sed --in-place --regexp-extended -e 's/loadBpf\(/LoadBpf(/g' -e 's/loadBpfObjects\(/LoadBpfObjects(/g' -e 's/(bpf(Objects|Programs|Maps|Specs|ProgramSpecs|MapSpecs|Variables|VariableSpecs))\b/Bpf\2/g' -e 's/^(type|func) ([a-z])/\1 \U\2\E/g' ${OUTPUT_DIR}/${OUTPUT_STEM}_${TARGET}.go
 
 build:
