@@ -13,7 +13,7 @@ RUN GOEXPERIMENT=jsonv2 CGO_ENABLED=0 GOOS=linux go build -a -ldflags="-s -w" -i
 
 FROM scratch
 
-COPY --from=builder /usr/src/bin/app .
+COPY --from=builder /usr/src/bin/app tracing
 USER 1000
 
-ENTRYPOINT ["./app"]
+ENTRYPOINT ["./tracing"]
