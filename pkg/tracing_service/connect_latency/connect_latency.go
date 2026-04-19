@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"sync"
 	"syscall"
+	"time"
 
 	motmedelErrors "github.com/Motmedel/utils_go/pkg/errors"
 	"github.com/Motmedel/utils_go/pkg/errors/types/nil_error"
@@ -84,10 +85,10 @@ func EnrichWithConnectLatencyEvent(base *schema.Base, event *tracing_service.Bpf
 		dstAddr = net.JoinHostPort(d.Ip, strconv.Itoa(d.Port))
 	}
 	base.Message = fmt.Sprintf(
-		"%s -> %s tcp connect_latency %dns",
+		"%s -> %s tcp connect_latency %s",
 		srcAddr,
 		dstAddr,
-		event.DurationNs,
+		time.Duration(event.DurationNs),
 	)
 
 	return nil
